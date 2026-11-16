@@ -11,7 +11,7 @@ Pull requests and pushes to `main` run [CI](../.github/workflows/ci.yml). A `vX.
 3. Pack the tested build and pass that archive to a separate publishing job. Test jobs have no npm publishing identity.
 4. Publish the archive through npm Trusted Publishing (OIDC), verify its public registry integrity and downloaded bytes, then create the GitHub Release with the same `.tgz` and `SHA256SUMS`.
 
-Stable versions use npm `latest`. Versions with a prerelease suffix use npm `next` and a GitHub prerelease. The workflow does not bump versions. It never overwrites an npm version or a Release asset. A rerun skips npm publication only when the existing version has the exact tested archive integrity; it verifies existing Release assets and uploads only missing assets. Changed content requires a new version.
+Stable versions use npm `latest`. Versions with a prerelease suffix use npm `next` and a GitHub prerelease. The workflow does not bump versions. It never overwrites an npm version or a Release asset. A rerun checks the existing archive integrity. If repacking changed archive metadata or group/other read permission bits, every regular file's content and all remaining permission bits must still match the tested package. The workflow then retains the immutable original npm archive, verifies existing Release assets and uploads only missing assets. Changed content, file types, write permissions or executable permissions require a new version.
 
 ### One-time npm setup
 
@@ -48,7 +48,7 @@ gh workflow run release.yml --repo oh-dsh-plugins/dsh-agentdeck \
   --ref main -f tag=v0.2.4
 ```
 
-Use the actual failed version tag in place of `v0.2.4`. If the version is not on npm yet, use that same tag for `--ref` as well; publication requires the run's source commit/ref to match the tested tag so npm provenance identifies the correct source. Already-published versions can use `--ref main` for verification and backfilling a GitHub Release, provided the tagged source rebuilds to the exact npm archive. GitHub's automatic source archives omit compiled runtime files; plugin installation uses the `.tgz` Release asset or the npm package.
+Use the actual failed version tag in place of `v0.2.4`. If the version is not on npm yet, use that same tag for `--ref` as well; publication requires the run's source commit/ref to match the tested tag so npm provenance identifies the correct source. Already-published versions can use `--ref main` for verification and backfilling a GitHub Release, provided the tagged source rebuilds to the same package contents and permitted mode bits; the existing original archive is retained for Release downloads. GitHub's automatic source archives omit compiled runtime files; plugin installation uses the `.tgz` Release asset or the npm package.
 
 ## 简体中文
 
@@ -59,7 +59,7 @@ Use the actual failed version tag in place of `v0.2.4`. If the version is not on
 3. 将通过测试的构建打成安装包，传给独立发布作业；测试作业没有 npm 发布身份。
 4. 通过 npm 可信发布（Trusted Publishing / OIDC）发布该安装包，核对公开 registry 的完整性和下载字节，再创建包含相同 `.tgz` 与 `SHA256SUMS` 的 GitHub Release。
 
-稳定版使用 npm `latest`；带预发布后缀的版本使用 npm `next` 和 GitHub 预发布。工作流不自动递增版本，不覆盖 npm 版本或 Release 附件。重跑时，只有已发布版本的完整性与本次测试包完全相同，才会跳过 npm 上传；已有附件逐字节核验，仅补传缺失附件。内容变更必须使用新版本。
+稳定版使用 npm `latest`；带预发布后缀的版本使用 npm `next` 和 GitHub 预发布。工作流不自动递增版本，不覆盖 npm 版本或 Release 附件。重跑时先核对归档完整性；如果重新打包仅改变归档元数据或组／其他用户的读取权限位，则逐个核对全部普通文件的内容和其余权限位，确认相同后保留 npm 上不可变的原始安装包。已有附件逐字节核验，仅补传缺失附件。文件内容、类型、写入或执行权限发生变化时，必须使用新版本。
 
 ### 一次性 npm 配置
 
@@ -71,6 +71,6 @@ Use the actual failed version tag in place of `v0.2.4`. If the version is not on
 
 从最新 `main` 开始，执行上面的版本递增示例，更新中英文 README 和更新记录，先提交并推送源码，再推送与包版本相同的 `v<版本号>` 标签。测试失败会阻止发布；认证失败应修正 npm 的可信发布配置。
 
-npm 已接收某版本后，不要移动标签或修改同版本内容。可以在 GitHub Actions 手动运行 `Release`，填写实际标签，或使用上面的 `gh workflow run` 命令恢复。如果版本尚未发布到 npm，`--ref` 也必须填写同一个版本标签，让来源证明（provenance）指向实际测试的提交；已发布版本的核验和 Release 补全可以从 `main` 启动，但重建安装包必须与 npm 上的原包完全一致。
+npm 已接收某版本后，不要移动标签或修改同版本内容。可以在 GitHub Actions 手动运行 `Release`，填写实际标签，或使用上面的 `gh workflow run` 命令恢复。如果版本尚未发布到 npm，`--ref` 也必须填写同一个版本标签，让来源证明（provenance）指向实际测试的提交；已发布版本的核验和 Release 补全可以从 `main` 启动，但重建包的全部文件内容和受检权限位必须与 npm 原包一致，下载附件保留该原始归档。
 
 GitHub 自动生成的源码压缩包不包含编译后的运行文件；安装插件应使用 Release 中的 `.tgz` 附件或 npm 包。

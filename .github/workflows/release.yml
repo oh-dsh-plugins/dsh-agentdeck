@@ -110,24 +110,65 @@ jobs:
         with:
           name: tested-npm-archive
           path: artifacts
-      - name: Check existing npm version and create checksums
+      - name: Check whether this npm version already exists
         id: npm
         run: |
           node --input-type=module <<'NODE'
           import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
           import { createHash } from 'node:crypto';
-          const filename = `dsh-agentdeck-${process.env.VERSION}.tgz`;
-          const archive = readFileSync(`artifacts/${filename}`);
-          const integrity = `sha512-${createHash('sha512').update(archive).digest('base64')}`;
+          const archive = readFileSync(`artifacts/dsh-agentdeck-${process.env.VERSION}.tgz`);
+          const integrity = value => `sha512-${createHash('sha512').update(value).digest('base64')}`;
           const response = await fetch(`https://registry.npmjs.org/dsh-agentdeck/${process.env.VERSION}`);
+          let repacked = false;
           if (response.status !== 404) {
             if (!response.ok) throw new Error(`npm metadata: HTTP ${response.status}`);
             const published = await response.json();
-            if (published.dist?.integrity !== integrity) throw new Error('This npm version exists with different bytes. Bump the version; never overwrite it.');
-            console.log('The exact tested archive is already on npm; publication will be skipped.');
+            if (published.dist?.integrity !== integrity(archive)) {
+              const download = await fetch(`https://registry.npmjs.org/dsh-agentdeck/-/dsh-agentdeck-${process.env.VERSION}.tgz`);
+              if (!download.ok) throw new Error(`Existing npm archive: HTTP ${download.status}`);
+              const original = Buffer.from(await download.arrayBuffer());
+              if (integrity(original) !== published.dist?.integrity) throw new Error('Existing npm archive failed its registry integrity check');
+              writeFileSync('artifacts/published.tgz', original);
+              repacked = true;
+            }
           }
-          appendFileSync(process.env.GITHUB_OUTPUT, `exists=${response.ok}\n`);
-          writeFileSync('artifacts/expected-integrity.txt', integrity);
+          appendFileSync(process.env.GITHUB_OUTPUT, `exists=${response.ok}\nrepacked=${repacked}\n`);
+          NODE
+      - name: Verify every file before retaining an existing original archive
+        if: steps.npm.outputs.repacked == 'true'
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, tarfile
+          from pathlib import Path, PurePosixPath
+          root = Path('artifacts').resolve()
+          tested = root / f"dsh-agentdeck-{os.environ['VERSION']}.tgz"
+          original = root / 'published.tgz'
+          if tested.resolve().parent != root or original.resolve().parent != root:
+              raise RuntimeError('Unexpected archive path')
+          def manifest(path):
+              rows = {}
+              with tarfile.open(path, 'r:gz') as archive:
+                  for entry in archive.getmembers():
+                      parts = PurePosixPath(entry.name).parts
+                      if not entry.isfile() or not parts or parts[0] != 'package' or '..' in parts or entry.name in rows:
+                          raise RuntimeError('Archive must contain unique regular package files')
+                      rows[entry.name] = (entry.mode & ~0o044, hashlib.sha256(archive.extractfile(entry).read()).hexdigest())
+              if not rows:
+                  raise RuntimeError('Empty npm archive')
+              return rows
+          if manifest(tested) != manifest(original):
+              raise RuntimeError('Published version differs in file content, type, write or executable permissions. Bump the version.')
+          os.replace(original, tested)
+          print('All package files and remaining permissions match; retaining the immutable original npm archive.')
+          PY
+      - name: Record integrity and checksums for the selected archive
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          const filename = `dsh-agentdeck-${process.env.VERSION}.tgz`;
+          const archive = readFileSync(`artifacts/${filename}`);
+          writeFileSync('artifacts/expected-integrity.txt', `sha512-${createHash('sha512').update(archive).digest('base64')}`);
           writeFileSync('artifacts/SHA256SUMS', `${createHash('sha256').update(archive).digest('hex')}  ${filename}\n`);
           NODE
       - name: Require provenance to identify the tested tag
