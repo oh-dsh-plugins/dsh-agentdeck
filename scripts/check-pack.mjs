@@ -3,7 +3,7 @@ import { access, readFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const data = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root, encoding: 'utf8' }))[0];
 const names = new Set(data.files.map(file => file.path));
-const required = ['lib/index.js', 'lib/role.js', 'lib/client.js', 'cordis.patch.yml', 'locale/en.json', 'locale/zh.json', 'icon.svg', 'README.md', 'README.zh-CN.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES.md', 'docs/core-contract.md', 'docs/ui-contract.md', 'docs/validation.md', 'LICENSE'];
+const required = ['lib/index.js', 'lib/role.js', 'lib/client.js', 'cordis.patch.yml', 'locale/en.json', 'locale/zh.json', 'icon.svg', 'README.md', 'README.zh-CN.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES.md', 'docs/core-contract.md', 'docs/ui-contract.md', 'docs/validation.md', 'docs/releasing.md', 'LICENSE'];
 const forbidden = [...names].filter(name => /^(?:\.agentdeck-dev\/|\.ci-browser\/|node_modules\/|issues\/|AGENTS\.md$|PRODUCT\.md$|docs\/verification\.md$|\.env(?:\.|$))/.test(name) || /\.(?:tgz|log)$/.test(name));
 if (forbidden.length) throw new Error(`Local-only files must not be packed: ${forbidden.join(', ')}`);
 for (const name of required) {

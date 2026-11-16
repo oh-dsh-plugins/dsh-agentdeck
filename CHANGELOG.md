@@ -2,6 +2,11 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## Unreleased
+
+- Add a version-tag Release workflow that tests and packs before publishing the same archive to npm through OIDC and attaching it to GitHub Releases with checksums.
+- Add bilingual Release installation and maintainer instructions, including immutable-version checks, reruns and source-aligned npm provenance.
+
 ## 0.2.4 — Initial public package
 
 - Prepare the first public npm package with compiled runtime resources, an explicit registry/access policy and bilingual npm installation instructions.

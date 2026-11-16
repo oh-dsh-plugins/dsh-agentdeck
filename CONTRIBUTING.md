@@ -35,7 +35,7 @@ The live browser probe is explicitly opt-in; see [verification scope](docs/valid
 - Keep machine-local instructions, raw browser captures, Session history, build outputs and dependencies out of Git and distributable packages.
 - Do not claim quality, cost or speed improvements without a matched native baseline.
 
-Use a Conventional Commit subject such as `fix(browser): retain session ownership during cancellation`. Pull requests should explain the concrete behavior change and relevant validation. The CI workflow only checks the project; it does not publish packages or create releases.
+Use a Conventional Commit subject such as `fix(browser): retain session ownership during cancellation`. Pull requests should explain the concrete behavior change and relevant validation. Pull requests and pushes to `main` run checks. A matching version tag starts the separate Release workflow, which requires those checks before npm publication and GitHub Release creation. See [releasing](docs/releasing.md) for the one-time npm trusted publisher setup, version/tag procedure and safe reruns.
 
 Changes to README text and package metadata do not update an installed runtime. Use the native plugin manager for local application testing and follow any required restart instruction.
 

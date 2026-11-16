@@ -44,6 +44,15 @@ dsh plugin --profile web add dsh-agentdeck@0.2.4
 
 Use your actual profile name instead of `web`. The DSH plugin manager installs the package and applies its native bundle patch. Restart DSH when the manager requests it, then refresh the existing Harness page.
 
+### GitHub Release archive
+
+Download `dsh-agentdeck-0.2.4.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
+
+```sh
+shasum -a 256 -c SHA256SUMS
+dsh plugin --profile web add ./dsh-agentdeck-0.2.4.tgz
+```
+
 ### Build from source
 
 To build and install a local archive:
@@ -204,6 +213,10 @@ npm run check:pack
 The recorded full suite passed **173 tests** on the pinned baseline, including native delegation, denial, cancellation, cold continuation, Team coexistence, atomic configuration updates and browser ownership. BrowserSkill fixture tests are opt-in when that public package is available. A separate live independent-child probe verified its own window and cleanup with a deterministic local model response and zero paid model calls.
 
 See [verification scope](docs/validation.md), [contributing](CONTRIBUTING.md), [core contract](docs/core-contract.md), [Client/Host contract](docs/ui-contract.md) and [changelog](CHANGELOG.md). Tests and UI checks do not establish model quality or token/cost/latency improvements against a strong native baseline.
+
+## Automated releases
+
+Pull requests and pushes to `main` run CI. Pushing a matching `vX.Y.Z` tag runs the full checks, publishes the tested archive to npm through Trusted Publishing, verifies its public bytes, and creates a GitHub Release with the `.tgz` and checksums. Stable releases use npm `latest`; prereleases use `next`. Package maintainers must complete the one-time npm trusted publisher setup described in the [bilingual release guide](docs/releasing.md).
 
 ## Security and license
 

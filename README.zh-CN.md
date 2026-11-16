@@ -44,6 +44,15 @@ dsh plugin --profile web add dsh-agentdeck@0.2.4
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。DSH 插件管理器负责安装软件包并应用原生组合补丁。管理器提示需要重启时，重启 DSH，再刷新已有 Harness 页面。
 
+### GitHub Release 安装包
+
+从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.2.4.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
+
+```sh
+shasum -a 256 -c SHA256SUMS
+dsh plugin --profile web add ./dsh-agentdeck-0.2.4.tgz
+```
+
 ### 从源码构建
 
 如需构建并安装本地归档：
@@ -204,6 +213,10 @@ npm run check:pack
 记录中的完整测试在固定基线上通过 **173 项**，包括原生委派、拒绝、取消、冷恢复、Team 共存、原子配置更新和浏览器归属。安装了公开 BrowserSkill 包时，可启用其适配测试。另一次真实独立子代理探针以确定性本地模型响应验证自有窗口及清理，付费模型调用为零。
 
 参见[验证范围](docs/validation.md)、[贡献指南](CONTRIBUTING.md)、[核心契约](docs/core-contract.md)、[客户端／宿主契约](docs/ui-contract.md)及[更新记录](CHANGELOG.md)。测试与页面检查不构成相对强原生基线的模型质量、词元、费用或延迟提升证据。
+
+## 自动发布
+
+拉取请求和推送到 `main` 会运行 CI。推送与包版本一致的 `vX.Y.Z` 标签后，工作流先运行完整检查，再通过 npm 可信发布上传已测试的安装包、核对公开下载字节，最后创建包含 `.tgz` 和校验文件的 GitHub Release。稳定版使用 npm `latest`，预发布使用 `next`。包维护者需先完成一次 npm 可信发布配置，具体步骤见[中英双语发布指南](docs/releasing.md)。
 
 ## 安全与许可证
 
