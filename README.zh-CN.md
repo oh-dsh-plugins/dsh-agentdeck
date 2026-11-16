@@ -4,6 +4,7 @@
 [![DSH 兼容版本](https://img.shields.io/badge/DSH-0.2.2--rc.3-blue)](package.json)
 [![CI](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml)
 [![MIT 许可证](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![npm 版本](https://img.shields.io/npm/v/dsh-agentdeck)](https://www.npmjs.com/package/dsh-agentdeck)
 
 [English](README.md) | 简体中文
 
@@ -35,7 +36,17 @@ DSH 提供自身的同伴依赖（peer dependencies）。不要为了满足本�
 
 ## 安装
 
-源码仓库公开。软件包保留 `private` 标记，**尚未发布到 npm**；请安装本地构建：
+将 npm 上的发行版本安装到兼容的 DSH 配置档：
+
+```sh
+dsh plugin --profile web add dsh-agentdeck@0.2.4
+```
+
+使用其他配置档（profile）时，将 `web` 替换为实际名称。DSH 插件管理器负责安装软件包并应用原生组合补丁。管理器提示需要重启时，重启 DSH，再刷新已有 Harness 页面。
+
+### 从源码构建
+
+如需构建并安装本地归档：
 
 ```sh
 git clone https://github.com/oh-dsh-plugins/dsh-agentdeck.git

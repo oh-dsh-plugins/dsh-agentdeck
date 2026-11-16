@@ -2,7 +2,9 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
-## 0.2.4 — Public source baseline
+## 0.2.4 — Initial public package
+
+- Prepare the first public npm package with compiled runtime resources, an explicit registry/access policy and bilingual npm installation instructions.
 
 - Provide 13 complete scene agents and three specialist variants, 16 bundled skills and four standard-library helpers.
 - Retain native DSH delegation, authorization, caller identity, cancellation, persistence, completion and Team coexistence.

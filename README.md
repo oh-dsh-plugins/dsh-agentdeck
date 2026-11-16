@@ -4,6 +4,7 @@
 [![DSH compatibility](https://img.shields.io/badge/DSH-0.2.2--rc.3-blue)](package.json)
 [![CI](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/dsh-agentdeck)](https://www.npmjs.com/package/dsh-agentdeck)
 
 English | [简体中文](README.zh-CN.md)
 
@@ -35,7 +36,17 @@ DSH supplies its own peer packages. Do not independently upgrade them inside an 
 
 ## Installation
 
-The source repository is public. The package remains marked `private` and is **not published to npm**; install a local build:
+Install the release from npm into a compatible DSH profile:
+
+```sh
+dsh plugin --profile web add dsh-agentdeck@0.2.4
+```
+
+Use your actual profile name instead of `web`. The DSH plugin manager installs the package and applies its native bundle patch. Restart DSH when the manager requests it, then refresh the existing Harness page.
+
+### Build from source
+
+To build and install a local archive:
 
 ```sh
 git clone https://github.com/oh-dsh-plugins/dsh-agentdeck.git
