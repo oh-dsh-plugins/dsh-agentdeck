@@ -1,0 +1,4 @@
+- insert:
+    - id: agentdeck
+      name: dsh-agentdeck
+      config: {}

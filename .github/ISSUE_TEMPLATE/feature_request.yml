@@ -1,0 +1,17 @@
+name: Feature request / 功能建议
+description: Describe the user outcome and a bounded use case.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / 问题
+      description: What task is difficult with the current behavior?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / 建议行为
+      description: Include the desired outcome, relevant limits and alternatives considered.
+    validations:
+      required: true

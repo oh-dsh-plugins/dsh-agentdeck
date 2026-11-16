@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: DSH 0.2.2-rc.3 / Node 24
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install the pinned DSH host
+        run: npm install --global --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.3
+      - name: Install source dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Link public host packages
+        run: npm run dev:link-host
+      - name: Install isolated BrowserSkill fixtures
+        run: npm install --prefix .ci-browser --ignore-scripts --no-audit --no-fund @wxg-prc-cpg/browser-skill-dsh-plugin@0.5.0
+      - name: Check TypeScript
+        run: npm run typecheck
+      - name: Run tests without a live browser or paid model
+        env:
+          AGENTDECK_BROWSER_MODULE_BASE: ${{ github.workspace }}/.ci-browser
+        run: npm test
+      - name: Verify distributable contents
+        run: npm run check:pack

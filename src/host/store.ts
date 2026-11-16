@@ -1,0 +1,70 @@
+import { createHash } from 'node:crypto';
+import { defineDomain } from '@deepseek-ai/dsh-storage-domain';
+import { z } from 'zod';
+import type { HostContext, OverrideRecord, RoleSnapshot, RunRecord } from './types.js';
+
+const overrideSchema = z.object({ id: z.string(), text: z.string(), revision: z.string(), updatedAt: z.number() });
+const snapshotSchema = z.object({ id: z.string(), presetId: z.string(), role: z.record(z.string(), z.unknown()), skills: z.array(z.unknown()), budget: z.record(z.string(), z.unknown()), model: z.record(z.string(), z.unknown()), createdAt: z.number(), policyVersion: z.literal(1), scriptRevisions: z.record(z.string(), z.string()).optional(), composition: z.literal('native-minimal').optional(), webTools: z.boolean().optional(), sourceRevision: z.string().optional(), candidateId: z.string().optional() });
+const runSchema = z.object({ id: z.string(), roleId: z.string(), revision: z.string(), parentId: z.string(), childId: z.string().optional(), description: z.string(), createdAt: z.number(), phase: z.enum(['starting', 'accepted', 'uncertain', 'failed']), error: z.string().optional(), model: z.record(z.string(), z.unknown()).optional(), fallback: z.object({ to: z.enum(['general', 'native']), reason: z.string() }).optional(), decision: z.object({ candidateId: z.string(), roleRevision: z.string(), source: z.enum(['default', 'recommended', 'legacy-route']), reason: z.string().optional() }).optional() });
+
+// Domain validates the public parse contract; the host and plugin may use different Zod minor typings.
+export const storeSpec = defineDomain({
+  name: 'dsh_agentdeck', version: 1, layout: 'per-record',
+  tables: { overrides: { valueSchema: overrideSchema }, snapshots: { valueSchema: snapshotSchema }, runs: { valueSchema: runSchema } },
+} as any);
+
+export function textRevision(text: string): string { return createHash('sha256').update(text).digest('hex'); }
+
+/** Owns plugin data, never the active profile's composition. */
+export class AgentDeckStore {
+  private serial = Promise.resolve();
+  private constructor(private readonly domain: any) {}
+  static async open(ctx: HostContext): Promise<AgentDeckStore> {
+    const facility = ctx.get('storageDomain');
+    if (!facility) throw new Error('AgentDeck requires the native storageDomain service for durable configuration and resume snapshots.');
+    const domain = await (facility as any).open(storeSpec);
+    return new AgentDeckStore(domain);
+  }
+  private table(name: 'overrides' | 'snapshots' | 'runs'): any { return this.domain.table(name); }
+  overrides(): OverrideRecord[] { return [...this.table('overrides').entries()].map(([, value]: any) => value).sort((a, b) => a.id.localeCompare(b.id)); }
+  snapshots(): RoleSnapshot[] { return [...this.table('snapshots').entries()].map(([, value]: any) => value); }
+  runs(): RunRecord[] { return [...this.table('runs').entries()].map(([, value]: any) => value).sort((a, b) => b.createdAt - a.createdAt); }
+  getRun(id: string): RunRecord | undefined { return this.table('runs').get(id); }
+  getOverride(id: string): OverrideRecord | undefined { return this.table('overrides').get(id); }
+  async snapshot(value: RoleSnapshot): Promise<void> {
+    if (!this.table('snapshots').get(value.id)) await this.table('snapshots').put(value.id, value);
+  }
+  async run(value: RunRecord): Promise<void> {
+    await this.mutate(async () => {
+      const current = this.getRun(value.id);
+      if (current?.childId && !value.childId) return;
+      if (current?.childId && value.childId !== current.childId) throw new Error('A startup receipt cannot change its accepted child identity.');
+      await this.table('runs').put(value.id, value);
+    });
+  }
+  async save(id: string, text: string, expectedRevision?: string, validate?: () => Promise<void>): Promise<OverrideRecord> {
+    return this.mutate(async () => {
+      const current = this.getOverride(id);
+      if (current && current.revision !== expectedRevision) throw new Error('Agent configuration changed. Reload it before saving; your draft has not been applied.');
+      if (!current && expectedRevision) throw new Error('Agent override no longer exists. Reload before saving.');
+      await validate?.();
+      const value = { id, text, revision: textRevision(text), updatedAt: Date.now() };
+      await this.table('overrides').put(id, value);
+      return value;
+    });
+  }
+  async reset(id: string, expectedRevision: string, validate?: () => Promise<void>): Promise<void> {
+    await this.mutate(async () => {
+      const current = this.getOverride(id);
+      if (!current || current.revision !== expectedRevision) throw new Error('Agent configuration changed. Reload before resetting.');
+      await validate?.();
+      await this.table('overrides').delete(id);
+    });
+  }
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.serial.then(operation);
+    this.serial = next.then(() => undefined, () => undefined);
+    return next;
+  }
+  async close(): Promise<void> { await this.serial; await this.domain.close(); }
+}

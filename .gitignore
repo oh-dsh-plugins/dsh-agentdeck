@@ -1,0 +1,17 @@
+node_modules/
+lib/
+coverage/
+*.tgz
+.DS_Store
+.agentdeck-dev/
+artifacts/
+.ci-browser/
+.env
+.env.*
+*.log
+
+# Local development instructions, planning and raw verification evidence.
+/AGENTS.md
+/PRODUCT.md
+/issues/
+/docs/verification.md
