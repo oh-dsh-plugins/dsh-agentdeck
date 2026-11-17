@@ -181,7 +181,7 @@ jobs:
           NODE
       - name: Publish the tested archive through npm OIDC
         if: steps.npm.outputs.exists != 'true'
-        run: npm publish "artifacts/dsh-agentdeck-${VERSION}.tgz" --access public --provenance --ignore-scripts --tag "$DIST_TAG" --registry https://registry.npmjs.org/
+        run: npm publish "./artifacts/dsh-agentdeck-${VERSION}.tgz" --access public --provenance --ignore-scripts --tag "$DIST_TAG" --registry https://registry.npmjs.org/
       - name: Verify public npm metadata and downloaded bytes
         run: |
           node --input-type=module <<'NODE'
