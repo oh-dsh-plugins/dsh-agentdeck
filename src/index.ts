@@ -26,7 +26,7 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
 
   const read = defineTool({
     name: 'scene_agent_catalog',
-    description: 'Discover ready-to-use AgentDeck scene agents, their actual model options, effective budgets and task records. Use general when no specialist fits. Read details only when needed; simple known-file work can use tools directly. Use candidates for the selected auto role to read its compact pool and revision. Configuration saving/resetting cannot alter model candidates or resource policy; those are owner-managed.',
+    description: 'Discover ready-to-use AgentDeck scene agents, their actual model options, effective budgets and task records. Use general when no specialist fits. Availability includes the saved default route authorization for this Session; unknown is not approval. Read details only when needed; simple known-file work can use tools directly. Use candidates for the selected auto role to read its compact pool and revision. Configuration saving/resetting cannot alter model candidates or resource policy; those are owner-managed.',
     parameters: {
       action: { type: 'string', enum: ['list', 'get', 'models', 'preview', 'candidates', 'runs', 'save', 'reset'] },
       id: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' },
@@ -42,7 +42,9 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
       switch (args.action ?? 'list') {
         case 'list': {
           const catalog = await controller.catalog(actor, exec.signal);
-          result = { agents: catalog.agents.map((agent: any) => ({ id: agent.id, title: agent.title, description: agent.description, enabled: agent.enabled, available: agent.available, missingCapabilities: agent.missingCapabilities, unverifiedCapabilities: agent.unverifiedCapabilities, capabilityCheck: agent.capabilityCheck, modelMode: agent.model.mode, revision: agent.revision })), diagnostics: catalog.diagnostics };
+          result = { agents: catalog.agents.map((agent: any) => ({ id: agent.id, title: agent.title, description: agent.description, enabled: agent.enabled, available: agent.available, capabilitiesAvailable: agent.capabilitiesAvailable,
+              authorization: { status: agent.authorization.status, ...(agent.authorization.code ? { code: agent.authorization.code, policy: agent.authorization.policy } : {}) },
+              ...(agent.configuredSelection ? { configuredSelection: { provider: agent.configuredSelection.provider, model: agent.configuredSelection.model } } : {}), missingCapabilities: agent.missingCapabilities, unverifiedCapabilities: agent.unverifiedCapabilities, capabilityCheck: agent.capabilityCheck, modelMode: agent.model.mode, revision: agent.revision })), diagnostics: catalog.diagnostics };
           break;
         }
         case 'get': {
@@ -65,7 +67,7 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
   });
   const start = defineTool({
     name: 'scene_agent_start',
-    description: 'Delegate a self-contained authorized task to an AgentDeck role on the native DSH chain. Omit role or choose general when no specialist fits. The tool returns a child Session id immediately and native completion arrives later. Preserve user scope; do not fall back around a refusal or repeat work after uncertain startup. For an auto role, read its compact catalog candidates and submit the matching revision plus optional candidateId/candidateReason; omitted candidate uses the configured default. No classifier call or candidate retry is performed.',
+    description: 'Delegate a self-contained authorized task to an AgentDeck role on the native DSH chain. Omit role or choose general when no specialist fits. The tool returns a child Session id immediately and native completion arrives later. Check catalog authorization for the saved default before dispatch; denied routes require owner action, not an automatic model or role switch. Preserve user scope; do not fall back around a refusal or repeat work after uncertain startup. For an auto role, read its compact catalog candidates and submit the matching revision plus optional candidateId/candidateReason; omitted candidate uses the configured default. No classifier call or candidate retry is performed.',
     parameters: {
       role: { type: 'string' }, prompt: { type: 'string', required: true }, description: { type: 'string' },
       cwd: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, reasoning_effort: { type: 'string' },
@@ -106,7 +108,7 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
       'Choose general (the default) for unmatched or ambiguous tasks. Unknown ids and disabled roles are errors, not implicit fallback. Explicit user role choice must not silently change. Discover actual model ids/efforts before overriding them.',
       'Starts return a child Session id. Native completion is delivered automatically; do not poll. Use scene_agent_control for these children, not Agent Teams target-name controls. On failures preserve completed work and scope; policy refusal must not trigger another route. Uncertain startup must be reconciled before creating another task.',
       `Factory roles: ${loadBuiltinAgents().map(agent => `${agent.id}: ${agent.description.en}`).join('; ')}`,
-      'User/project extensions and current availability are in scene_agent_catalog. For an auto role read only its compact candidates, choose from that pool using task scope, and pass candidateId plus revision; otherwise its default is used. Do not load all pools or run a classifier. Candidate/resource edits belong to the owner UI. Read result detail only when the completion notice is insufficient. Do not claim efficiency improvements without measurement.',
+      'User/project extensions and current Session availability are in scene_agent_catalog. Check default-route authorization before dispatch. A denied default requires owner action; do not silently switch models or roles. Unknown authorization is not approval. For an auto role read only its compact candidates, choose from that pool using task scope, and pass candidateId plus revision; otherwise its default is used. Do not load all pools or run a classifier. Candidate/resource edits belong to the owner UI. Read result detail only when the completion notice is insufficient. Do not claim efficiency improvements without measurement.',
     ].join('\n'),
   }), 'AgentDeck main-agent guidance');
 

@@ -246,9 +246,24 @@ test('Host pipeline retains policy refusal and durable same-call idempotence wit
 test('Host rejects unauthorized explicit routes and unknown roles before accepting a child', async () => {
   const f = await fixture({ allowNativeFallback: true });
   try {
-    const denied = await start(f, { provider: ROUTE.provider, model: 'forbidden' });
+    await ownerSave(f, 'reader', JSON.stringify({ schemaVersion: 1, id: 'reader', model: { mode: 'fixed', provider: ROUTE.provider, model: 'forbidden' } }));
+    const listed = success(await f.call('scene_agent_catalog')).agents.find(role => role.id === 'reader');
+    assert.equal(listed.available, false);
+    assert.equal(listed.capabilitiesAvailable, true);
+    assert.equal(listed.authorization.status, 'denied');
+    assert.deepEqual(listed.configuredSelection, { provider: ROUTE.provider, model: 'forbidden' });
+    const preview = success(await f.call('scene_agent_catalog', { action: 'preview', id: 'reader' }));
+    assert.equal(preview.authorization.code, 'AGENTDECK_MODEL_NOT_AUTHORIZED');
+    const denied = await start(f);
     assert.equal(denied.isError, true);
+    assert.match(text(denied), /AGENTDECK_MODEL_NOT_AUTHORIZED/);
     assert.match(text(denied), /not authorized by this Session/);
+    assert.match(text(denied), /No child was started/);
+    assert.match(text(denied), /Allowed explicit routes:/);
+    assert.match(text(denied), /create a new Session/);
+    const explicit = await start(f, { provider: ROUTE.provider, model: 'also-forbidden' });
+    assert.equal(explicit.isError, true);
+    assert.match(text(explicit), /also-forbidden.*not authorized/);
     const unknown = await start(f, { role: 'nonexistent-role' });
     assert.equal(unknown.isError, true);
     assert.match(text(unknown), /Unknown or invalid AgentDeck role/);

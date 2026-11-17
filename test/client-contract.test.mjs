@@ -671,6 +671,96 @@ test('role details use current preview readiness without changing catalog or acc
   assert.equal(plugin.roleView(undefined, { agent: ready }), undefined);
 });
 
+const browserRole = {
+  ...general, id: 'ui-verifier', available: false, capabilitiesAvailable: false,
+  authorization: { status: 'authorized' }, unverifiedCapabilities: ['browser-observe'],
+  browserSupport: { backend: 'bsk', state: 'unverified' },
+};
+const readyBrowserPreview = { agent: {
+  ...browserRole, available: true, capabilitiesAvailable: true, unverifiedCapabilities: [],
+  browserSupport: { backend: 'bsk', state: 'ready' },
+} };
+
+for (const failure of ['error', 'timeout']) test(`refresh invalidates ready evidence when the new preview ends in ${failure}`, async () => {
+  const late = deferred();
+  let refreshing = false;
+  const f = deadlineHarness(call => call.endpoint === 'agentdeck.catalog' ? ok(catalog([], [browserRole]))
+    : !refreshing ? ok(clone(readyBrowserPreview))
+      : failure === 'error' ? { ok: false, error: { code: 'PROBE_FAILED', message: 'Readiness probe failed' } } : late.promise);
+  await f.controller.loadCatalog();
+  await f.controller.loadPreview(browserRole.id);
+  assert.equal(plugin.roleView(browserRole, f.controller.getSnapshot().preview, true).available, true);
+  f.controller.edit(browserRole.id, 'unsaved draft');
+  refreshing = true;
+  const work = f.controller.refresh();
+  if (failure === 'timeout') {
+    for (let turn = 0; turn < 20 && !f.controller.getSnapshot().busy.preview; turn++) await Promise.resolve();
+    assert.equal(f.controller.getSnapshot().busy.preview, true);
+    f.expire();
+  }
+  await work;
+  const state = f.controller.getSnapshot();
+  assert.equal(state.errors.preview.code, failure === 'error' ? 'PROBE_FAILED' : 'requestTimeout');
+  assert.equal(state.preview, null);
+  const listed = plugin.roleView(state.catalog.agents[0], state.preview, true);
+  assert.equal(listed.available, false);
+  assert.equal(plugin.roleStatus(listed), 'capabilityUnknown');
+  assert.equal(listed.browserSupport.state, 'unverified');
+  assert.equal(state.catalog.agents.filter(agent => !plugin.roleView(agent, state.preview, true).available).length, 1);
+  assert.equal(state.drafts[browserRole.id].text, 'unsaved draft');
+  late.resolve(ok(clone(readyBrowserPreview)));
+  await Promise.resolve();
+  assert.equal(f.controller.getSnapshot().preview, null, 'Late preview output cannot restore stale readiness.');
+  refreshing = false;
+  await f.controller.loadPreview(browserRole.id);
+  assert.equal(plugin.roleView(browserRole, f.controller.getSnapshot().preview, true).available, true);
+  f.controller.dispose();
+});
+
+test('refresh cancels an older preview before waiting for the new catalog', async () => {
+  const late = deferred();
+  const nextCatalog = deferred();
+  let refreshing = false;
+  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.catalog'
+    ? refreshing ? nextCatalog.promise : ok(catalog([], [browserRole])) : late.promise);
+  await controller.loadCatalog();
+  const older = controller.loadPreview(browserRole.id);
+  const previousCall = calls.at(-1);
+  refreshing = true;
+  const work = controller.refresh();
+  assert.equal(previousCall.signal.aborted, true);
+  late.resolve(ok(clone(readyBrowserPreview)));
+  await older;
+  assert.equal(controller.getSnapshot().preview, null);
+  nextCatalog.resolve({ ok: false, error: { code: 'CATALOG_FAILED', message: 'Catalog unavailable' } });
+  await work;
+  assert.equal(controller.getSnapshot().preview, null);
+  controller.dispose();
+});
+
+test('role badges distinguish authorization from capabilities and keep default authorization in the list', () => {
+  const denied = { ...general, capabilitiesAvailable: true, available: false, authorization: { status: 'denied' }, configuredSelection: { provider: 'q', model: 'large' } };
+  assert.equal(plugin.roleStatus(denied), 'modelDenied');
+  assert.equal(plugin.roleStatus({ ...denied, authorization: { status: 'unknown' } }), 'authorizationUnknown');
+  assert.equal(plugin.roleStatus({ ...denied, enabled: false }), 'disabled');
+  assert.equal(plugin.roleStatus({ ...denied, authorization: { status: 'authorized' }, available: true }), 'available');
+  const selectedCandidate = { ...denied, available: true, authorization: { status: 'authorized' }, configuredSelection: { provider: 'p', model: 'm' }, browserSupport: { state: 'ready' } };
+  const listed = plugin.roleView(denied, { agent: selectedCandidate }, true);
+  assert.equal(plugin.roleStatus(listed), 'modelDenied', 'An allowed alternate preview does not change the saved default badge.');
+  assert.equal(listed.browserSupport.state, 'ready');
+  assert.equal(listed.available, false);
+  assert.equal(plugin.roleStatus(plugin.roleView(denied, { agent: selectedCandidate })), 'available');
+  assert.equal(denied.configuredSelection.model, 'large');
+});
+
+test('a denied alternate preview labels the selected model while the authorized default stays available', () => {
+  const agent = { ...general, available: true, capabilitiesAvailable: true, authorization: { status: 'authorized' }, configuredSelection: { provider: 'p', model: 'm' } };
+  const candidate = { ...agent, available: false, authorization: { status: 'denied' }, configuredSelection: { provider: 'q', model: 'large' } };
+  assert.equal(plugin.roleStatus(plugin.roleView(agent, { agent: candidate }), true), 'selectedModelDenied');
+  assert.equal(plugin.roleStatus(plugin.roleView(agent, { agent: candidate }, true)), 'available');
+  assert.equal(agent.configuredSelection.model, 'm');
+});
+
 test('client imports only host React, and every CSS color uses native aliases', () => {
   assert.deepEqual([...source.matchAll(/require\(['"]([^'"]+)['"]\)/g)].map(match => match[1]), ['react']);
   assert.equal(/\bfetch\s*\(/.test(source), false);

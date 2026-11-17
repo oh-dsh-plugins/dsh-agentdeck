@@ -169,6 +169,79 @@ test('inherit and fixed roles preserve compatible effort and honor a role cap ab
   assert.throws(() => roleChoice(factory, parent, { maxTokens: 5000 }), /owner-configured/);
 });
 
+test('catalog exposes a fixed default route denial before dispatch without model discovery', async () => {
+  const f = await fixture();
+  try {
+    const saved = await f.controller.save({ id: 'reader', text: definition({ model: { mode: 'fixed', provider: 'q', model: 'large' } }) });
+    const listed = (await f.controller.catalog(f.actor)).agents.find(role => role.id === 'reader');
+    assert.equal(listed.capabilitiesAvailable, true);
+    assert.equal(listed.available, false);
+    assert.equal(listed.authorization.status, 'denied');
+    assert.equal(listed.authorization.code, 'AGENTDECK_MODEL_NOT_AUTHORIZED');
+    assert.equal(listed.authorization.policy, 'parent-only');
+    assert.deepEqual(listed.authorization.allowedModels, [{ provider: 'p', model: 'm' }]);
+    assert.deepEqual(listed.configuredSelection, { provider: 'q', model: 'large', maxTokens: 1000 });
+    const preview = await f.controller.preview('reader', f.actor);
+    assert.deepEqual(preview.authorization, listed.authorization);
+    assert.equal(preview.agent.available, false);
+    assert.equal(f.store.getOverride('reader').revision, saved.revision);
+    assert.deepEqual(f.calls.config, []);
+    assertNoDirectory(f.calls);
+  } finally { await f.close(); }
+});
+
+test('catalog distinguishes unknown authorization, inherited routes and an explicit empty policy', async () => {
+  const f = await fixture();
+  try {
+    const unknown = (await f.controller.catalog()).agents.find(role => role.id === 'reader');
+    assert.equal(unknown.available, false);
+    assert.equal(unknown.capabilitiesAvailable, true);
+    assert.equal(unknown.authorization.status, 'unknown');
+    f.allow([]);
+    const inherited = (await f.controller.catalog(f.actor)).agents.find(role => role.id === 'reader');
+    assert.equal(inherited.authorization.status, 'authorized', 'Native implicit inheritance keeps the current route.');
+    assert.equal(inherited.available, true);
+    await f.controller.save({ id: 'reader', text: definition({ model: { mode: 'fixed', provider: 'p', model: 'm' } }) });
+    const fixed = (await f.controller.catalog(f.actor)).agents.find(role => role.id === 'reader');
+    assert.equal(fixed.authorization.status, 'denied', 'An explicit route must satisfy the saved policy even for the same model.');
+    assert.equal(fixed.authorization.policy, 'session');
+    assert.deepEqual(fixed.authorization.allowedModels, []);
+    assert.deepEqual(f.calls.metadata, []);
+    assert.deepEqual(f.calls.config, []);
+  } finally { await f.close(); }
+});
+
+test('invalid candidate preview cannot retain a capability-only available badge', async () => {
+  const f = await fixture();
+  try {
+    await f.controller.save({ id: 'reader', text: definition(autoPatch()) });
+    const preview = await f.controller.preview('reader', f.actor, undefined, { candidateId: 'missing' });
+    assert.equal(preview.authorization.status, 'unknown');
+    assert.equal(preview.agent.authorization.status, 'unknown');
+    assert.equal(preview.agent.capabilitiesAvailable, true);
+    assert.equal(preview.agent.available, false);
+    assert.ok(preview.diagnostics.length);
+    assert.deepEqual(f.calls.config, []);
+  } finally { await f.close(); }
+});
+
+test('auto default authorization does not select another allowed candidate', async () => {
+  const f = await fixture();
+  try {
+    await f.controller.save({ id: 'reader', text: definition(autoPatch()) });
+    f.allow([{ provider: 'q', model: 'large' }]);
+    const listed = (await f.controller.catalog(f.actor)).agents.find(role => role.id === 'reader');
+    assert.equal(listed.authorization.status, 'denied');
+    assert.equal(listed.configuredSelection.model, 'm');
+    const preview = await f.controller.preview('reader', f.actor, undefined, { candidateId: 'deep' });
+    assert.equal(preview.authorization.status, 'authorized');
+    assert.equal(preview.agent.available, true);
+    assert.equal(preview.configuredSelection.model, 'large');
+    assert.equal((await f.controller.catalog(f.actor)).agents.find(role => role.id === 'reader').authorization.status, 'denied');
+    assert.equal(f.calls.observations, f.calls.disposed);
+  } finally { await f.close(); }
+});
+
 test('fixed and auto previews without a Session retain declarations and configured capacity', async () => {
   const f = await fixture();
   try {

@@ -1,4 +1,4 @@
-import type { HostContext, RuntimeAgent, JsonObject } from './types.js';
+import type { HostContext, RuntimeAgent, JsonObject, EffectiveSelection } from './types.js';
 import { messageOf } from './types.js';
 
 export function currentSelection(agent?: RuntimeAgent): JsonObject | undefined {
@@ -28,6 +28,24 @@ export async function sessionRoutes(ctx: HostContext, agent?: RuntimeAgent, sign
     }
     return undefined;
   } finally { observation[Symbol.dispose](); }
+}
+
+/** Match native implicit inheritance and explicit route policy without discovering models. */
+export function routeAuthorization(configured: EffectiveSelection | undefined, parent: JsonObject | undefined,
+  routes: { provider: string; model: string }[] | undefined, hasSession: boolean, explicit: boolean): JsonObject {
+  if (!hasSession || !configured || !parent) return { status: 'unknown' };
+  const same = parent.provider === configured.provider && parent.model === configured.model;
+  const allowedModels = routes ?? [{ provider: parent.provider, model: parent.model }];
+  if ((!explicit && same) || allowedModels.some(route => route.provider === configured.provider && route.model === configured.model)) return { status: 'authorized' };
+  const allowed = allowedModels.slice(0, 8).map(route => `${route.provider}/${route.model}`).join(', ') || '(none)';
+  return { status: 'denied', code: 'AGENTDECK_MODEL_NOT_AUTHORIZED', policy: routes ? 'session' : 'parent-only',
+    route: { provider: configured.provider, model: configured.model }, allowedModels,
+    message: `[AGENTDECK_MODEL_NOT_AUTHORIZED] The effective role route ${configured.provider}/${configured.model} is not authorized by this Session. No child was started. Allowed explicit routes: ${allowed}${allowedModels.length > 8 ? ' (more in Session policy)' : ''}. The owner can change the saved role model in AgentDeck, or configure native /model-selection-settings and create a new Session. Settings changes do not authorize this existing Session. Native delegation will not be bypassed.` };
+}
+
+export class ModelAuthorizationError extends Error {
+  readonly code = 'AGENTDECK_MODEL_NOT_AUTHORIZED';
+  constructor(readonly details: JsonObject) { super(details.message); }
 }
 
 export function modelView(info: JsonObject, authorized: boolean | null): JsonObject {

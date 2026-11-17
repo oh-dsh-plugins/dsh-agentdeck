@@ -13,7 +13,11 @@ window.__ModuleLoader__.load({
         loading: 'Loading…', retry: 'Retry', search: 'Search agents', searchHint: 'Name, description or capability',
         noRoles: 'No agents match this search.', noCatalog: 'Agent definitions could not be loaded.',
         chooseRole: 'Choose an agent to see its settings.', builtin: 'Factory', custom: 'Custom', override: 'Customized',
-        enabled: 'Enabled', disabled: 'Disabled', available: 'Available', unavailable: 'Missing capabilities',
+        enabled: 'Enabled', disabled: 'Disabled', available: 'Available for this Session', unavailable: 'Missing capabilities',
+        modelDenied: 'Default model not authorized', selectedModelDenied: 'Selected model not authorized', capabilityUnknown: 'Capabilities unverified',
+        modelDeniedHint: 'The selected model {route} is not authorized for this Session.',
+        allowedRoutes: 'Allowed explicit models: {routes}',
+        authorizationRecovery: 'Choose an allowed model here and save, or configure native /model-selection-settings and create a new Session. Changes to native authorization settings do not update an existing Session.',
         missing: 'Missing: {items}', revision: 'Revision', session: 'Session context', noSession: 'No Session selected',
         sessionHint: 'Select a Session to see its actual model authorization. This does not grant access.',
         newRole: 'New agent', derive: 'Derive agent', import: 'Import YAML', export: 'Export YAML',
@@ -57,7 +61,7 @@ window.__ModuleLoader__.load({
         duplicateId: 'This id already exists. Select that agent to edit it, or choose a new id.',
         unsavedImport: 'Imported YAML is staged locally. Review and save to apply it.',
         exportFailed: 'Could not export this draft.', count: '{count} agents', filterAll: 'All agents', filterEnabled: 'Enabled only',
-        filterUnavailable: 'Missing capabilities', roleFilter: 'Filter agents', errorDetails: 'Error details',
+        filterUnavailable: 'Unavailable or unverified', roleFilter: 'Filter agents', errorDetails: 'Error details',
         fileRead: 'Reading YAML…', source: 'Source', generalFallback: 'General fallback',
         leaveDrafts: 'You have unsaved AgentDeck drafts.', sessionEffort: 'Current Session effort',
         effectiveEffort: 'Effective reasoning effort', effectiveHint: 'Configured values describe the saved agent. Validated values reflect the selected Session.',
@@ -74,7 +78,11 @@ window.__ModuleLoader__.load({
         loading: '正在加载…', retry: '重试', search: '搜索代理', searchHint: '名称、描述或能力',
         noRoles: '没有匹配的代理。', noCatalog: '无法加载代理定义。',
         chooseRole: '选择代理以查看设置。', builtin: '出厂预设', custom: '自定义', override: '已定制',
-        enabled: '已启用', disabled: '已停用', available: '可用', unavailable: '缺少能力',
+        enabled: '已启用', disabled: '已停用', available: '可用于此会话', unavailable: '缺少能力',
+        modelDenied: '默认模型未授权', selectedModelDenied: '所选模型未授权', capabilityUnknown: '能力待验证',
+        modelDeniedHint: '所选模型 {route} 未获此会话授权。',
+        allowedRoutes: '允许显式选择的模型：{routes}',
+        authorizationRecovery: '可在此选择已授权模型并保存，或通过原生 /model-selection-settings 配置授权后新建会话。修改原生授权设置不会更新已有会话。',
         missing: '缺少：{items}', revision: '版本', session: '会话上下文', noSession: '未选择会话',
         sessionHint: '选择会话以查看其实际模型授权。此操作不会授予权限。',
         newRole: '新建代理', derive: '派生代理', import: '导入 YAML', export: '导出 YAML',
@@ -118,7 +126,7 @@ window.__ModuleLoader__.load({
         duplicateId: '此标识已存在。请选择该代理进行编辑，或使用新标识。',
         unsavedImport: 'YAML 已暂存于本地，检查并保存后生效。',
         exportFailed: '无法导出此草稿。', count: '{count} 个代理', filterAll: '全部代理', filterEnabled: '仅已启用',
-        filterUnavailable: '缺少能力', roleFilter: '筛选代理', errorDetails: '错误详情',
+        filterUnavailable: '不可用或待验证', roleFilter: '筛选代理', errorDetails: '错误详情',
         fileRead: '正在读取 YAML…', source: '来源', generalFallback: '通用兜底',
         leaveDrafts: '代理工具箱中有未保存的草稿。', sessionEffort: '当前会话推理强度',
         effectiveEffort: '实际生效推理强度', effectiveHint: '配置值对应已保存代理，已校验值对应当前选中的会话。',
@@ -193,8 +201,20 @@ window.__ModuleLoader__.load({
       }
       return issues;
     }
-    function roleView(agent, preview) {
-      return agent && preview?.agent?.id === agent.id && preview.agent.revision === agent.revision ? preview.agent : agent;
+    function roleView(agent, preview, defaultRoute = false) {
+      if (!agent || preview?.agent?.id !== agent.id || preview.agent.revision !== agent.revision) return agent;
+      if (!defaultRoute) return preview.agent;
+      // Live capability evidence also updates the list. Its model badge still describes the saved default.
+      return { ...preview.agent, authorization: agent.authorization, configuredSelection: agent.configuredSelection,
+        available: Boolean(preview.agent.capabilitiesAvailable && agent.authorization?.status === 'authorized') };
+    }
+    function roleStatus(agent, selectedModel = false) {
+      if (!agent.enabled) return 'disabled';
+      if (agent.authorization?.status === 'denied') return selectedModel ? 'selectedModelDenied' : 'modelDenied';
+      if (agent.missingCapabilities?.length) return 'unavailable';
+      if (agent.unverifiedCapabilities?.length) return 'capabilityUnknown';
+      if (agent.authorization?.status !== 'authorized') return 'authorizationUnknown';
+      return agent.available ? 'available' : 'unavailable';
     }
     // Metadata, authorization and output validation are independent facts, including without a Session.
     function previewFacts(preview, sessionId) {
@@ -527,6 +547,7 @@ window.__ModuleLoader__.load({
         return model?.mode === 'auto' ? (model.candidates.some(item => item.id === state.previewCandidates[id]) ? state.previewCandidates[id] : model.defaultCandidate) : undefined;
       }
       function loadPreview(id, candidateId = previewCandidate(id), revision = findAgent(id)?.revision) {
+        publish({ preview: null });
         return request('preview', 'preview', { id, ...sessionPayload(), ...(revision ? { revision } : {}), ...(candidateId ? { candidateId } : {}) }, preview => publish({ preview }));
       }
       function syncReads(force = false) {
@@ -558,7 +579,8 @@ window.__ModuleLoader__.load({
       async function refresh() {
         refreshing = true;
         cancelModelReads();
-        publish({ models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false });
+        requests.get('preview')?.abort(); requests.delete('preview');
+        publish({ preview: null, busy: { ...state.busy, preview: false }, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false });
         try {
           const answer = await loadCatalog();
           if (answer.ok && !disposed) { refreshing = false; await syncReads(true); }
@@ -713,7 +735,12 @@ window.__ModuleLoader__.load({
           [t('sessionEffort'), (models?.selection || preview?.sessionSelection)?.reasoningEffort ?? t('unknown')],
           [t('modalities'), exact?.inputModalities?.join(', ') || t('unknown')]
         ] }),
-        facts.authorization.message && h('p', { className: 'ad-warning' }, facts.authorization.message),
+        facts.authorization.code === 'AGENTDECK_MODEL_NOT_AUTHORIZED'
+          ? h('div', { className: 'ad-warning', role: 'alert' },
+            h('p', null, t('modelDeniedHint', { route: facts.authorization.route.provider + ' / ' + facts.authorization.route.model })),
+            h('p', null, t('allowedRoutes', { routes: facts.authorization.allowedModels.map(item => item.provider + ' / ' + item.model).join(', ') || t('none') })),
+            h('p', { className: 'ad-help' }, t('authorizationRecovery')))
+          : facts.authorization.message && h('p', { className: 'ad-warning', role: 'alert' }, facts.authorization.message),
         h('p', { className: 'ad-help' }, t('effectiveHint')),
         exact?.error && h('p', { className: 'ad-error' }, exact.error),
         !exact && !metadata.busy && h('p', { className: 'ad-help' }, t('metadataUnavailable')),
@@ -742,7 +769,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ad-actions' }, agent && h(Button, { onClick: () => controller.beginCreate(agent.id) }, t('derive')), h(Button, { onClick: () => exportDraft(state.selectedId) }, t('export')))),
         agent && h('p', { className: 'ad-detail-desc' }, localized(agent.description)),
         agent && h('div', { className: 'ad-tags' },
-          h('span', { className: agent.available ? 'ad-status' : 'ad-warning' }, t(agent.available ? 'available' : agent.unverifiedCapabilities?.length && !agent.missingCapabilities.length ? 'unknown' : 'unavailable')),
+          h('span', { className: agent.available ? 'ad-status' : 'ad-warning' }, t(roleStatus(agent, true))),
           h('span', { className: 'ad-tag' }, t('revision') + ' ' + agent.revision.slice(0, 12)),
           agent.id === 'general' && h('span', { className: 'ad-tag' }, t('generalFallback'))),
         agent?.missingCapabilities.length > 0 && h('p', { className: 'ad-warning' }, t('missing', { items: agent.missingCapabilities.map(id => t('cap.' + id)).join(', ') })),
@@ -885,7 +912,7 @@ window.__ModuleLoader__.load({
         reader.readAsText(file);
       };
       const refresh = () => controller.refresh();
-      const roles = state.catalog?.agents || [];
+      const roles = (state.catalog?.agents || []).map(item => roleView(item, state.preview, true));
       const lowerSearch = search.toLocaleLowerCase();
       const filtered = roles.filter(item => (filter === 'all' || filter === 'enabled' && item.enabled || filter === 'unavailable' && !item.available) && [item.id, locale.resolveText(item.title), locale.resolveText(item.description), ...item.capabilities, ...item.capabilities.map(id => t('cap.' + id))].join(' ').toLocaleLowerCase().includes(lowerSearch));
       const broken = state.catalog?.overrides.filter(item => !roles.some(agent => agent.id === item.id) && item.id.toLocaleLowerCase().includes(lowerSearch)) || [];
@@ -907,7 +934,7 @@ window.__ModuleLoader__.load({
               h('label', { className: 'ad-field ad-search' }, h('span', { className: 'ad-sr' }, t('search')), h('input', { type: 'search', value: search, placeholder: t('searchHint'), onChange: event => setSearch(event.target.value) })),
               h('label', { className: 'ad-field' }, h('span', { className: 'ad-sr' }, t('roleFilter')), h('select', { value: filter, onChange: event => setFilter(event.target.value) }, h('option', { value: 'all' }, t('filterAll')), h('option', { value: 'enabled' }, t('filterEnabled')), h('option', { value: 'unavailable' }, t('filterUnavailable')))),
               h('p', { className: 'ad-help', style: { marginTop: 8 } }, t('count', { count: filtered.length + broken.length })),
-              h('ul', { className: 'ad-role-list' }, filtered.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, locale.resolveText(item.title)), h('span', { className: 'ad-role-meta' }, h('span', null, t(item.enabled ? 'enabled' : 'disabled')), !item.available && h('span', { className: 'ad-warning' }, t(item.unverifiedCapabilities?.length && !item.missingCapabilities.length ? 'unknown' : 'unavailable')), isDirty(state.drafts[item.id]) && h('span', null, t('dirty')))))), broken.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, item.id), h('span', { className: 'ad-role-meta ad-warning' }, t('unavailable')))))),
+              h('ul', { className: 'ad-role-list' }, filtered.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, locale.resolveText(item.title)), h('span', { className: 'ad-role-meta' }, h('span', null, t(item.enabled ? 'enabled' : 'disabled')), h('span', { className: item.available ? 'ad-status' : 'ad-warning' }, t(roleStatus(item))), isDirty(state.drafts[item.id]) && h('span', null, t('dirty')))))), broken.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, item.id), h('span', { className: 'ad-role-meta ad-warning' }, t('unavailable')))))),
               !filtered.length && !broken.length && h('p', { className: 'ad-empty' }, t('noRoles'))),
               h(RoleDetail, { state, controller, t, locale, exportDraft }))),
           state.tab === 'runs' && h(Runs, { state, controller, t, locale }),
@@ -917,7 +944,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale', 'connection'],
       // Pure state and serialization exports allow contract tests without a DOM or a second React runtime.
-      createController, definitionText, formIssues, previewFacts, roleView, selectionOptions, dictionaries,
+      createController, definitionText, formIssues, previewFacts, roleView, roleStatus, selectionOptions, dictionaries,
       apply(ctx) {
         const locale = ctx.get('locale');
         ctx.effect(() => locale.register(NS, 'en', dictionaries.en));

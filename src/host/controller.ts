@@ -10,7 +10,7 @@ import type { SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent';
 import { AgentDeckStore, textRevision } from './store.js';
 import { NativeDelegator, NativeDelegationFailure } from './native.js';
 import { SnapshotPresets } from './presets.js';
-import { currentSelection, delegationSelection, modelDirectory, modelView, sessionRoutes } from './models.js';
+import { currentSelection, delegationSelection, modelDirectory, modelView, sessionRoutes, routeAuthorization, ModelAuthorizationError } from './models.js';
 import { missingCapabilities } from './capabilities.js';
 import { readRunResult } from './results.js';
 import { roleChoice } from './selection.js';
@@ -114,12 +114,23 @@ export class AgentDeckController {
     const required = missing.filter(value => !['web-research', 'browser-observe', 'browser-interact'].includes(value));
     return { ...role, revision: agentRevision(role), available: role.enabled && required.length === 0 && unverified.length === 0 && !blocked, missingCapabilities: required, unverifiedCapabilities: unverified, capabilityCheck: 'static', ...(browserSupport ? { browserSupport } : {}), builtin: this.builtinIds.has(role.id) };
   }
+  private selectionView(view: ReturnType<AgentDeckController['roleView']>, choice: ReturnType<typeof roleChoice>, authorization: JsonObject) {
+    return { ...view, capabilitiesAvailable: view.available, available: view.available && authorization.status === 'authorized',
+      ...(choice.configured ? { configuredSelection: choice.configured } : {}), authorization };
+  }
   async catalog(agent?: RuntimeAgent, signal = new AbortController().signal): Promise<JsonObject> {
     const catalog = await this.resolved(agent);
     signal.throwIfAborted();
     const names = this.names();
+    const parent = delegationSelection(agent);
+    const routes = await sessionRoutes(this.ctx, agent, signal);
+    signal.throwIfAborted();
     return {
-      agents: catalog.agents.map(role => this.roleView(role, names, catalog.blockers.length > 0)),
+      agents: catalog.agents.map(role => {
+        const choice = roleChoice(role, parent);
+        return this.selectionView(this.roleView(role, names, catalog.blockers.length > 0), choice,
+          routeAuthorization(choice.configured, parent, routes, !!agent, choice.explicit));
+      }),
       diagnostics: [...catalog.diagnostics, ...this.diagnostics.map(message => ({ message }))],
       overrides: this.store.overrides(),
       runtime: { compatibilityVersion: '0.2.2-rc.3', nativeProvider: !!this.ctx.subagents.getProvider('spawn'), storage: true },
@@ -142,12 +153,10 @@ export class AgentDeckController {
     if (!role.enabled) throw new Error(`AgentDeck role "${id}" is disabled.`);
     return role;
   }
-  private async authorized(configured: EffectiveSelection, agent: RuntimeAgent, explicit: boolean, signal?: AbortSignal): Promise<boolean> {
-    const parent = delegationSelection(agent);
-    const same = parent?.provider === configured.provider && parent?.model === configured.model;
-    if (!explicit && same) return true;
+  private async authorization(configured: EffectiveSelection | undefined, agent: RuntimeAgent | undefined, explicit: boolean, signal?: AbortSignal): Promise<JsonObject> {
     const routes = await sessionRoutes(this.ctx, agent, signal);
-    return routes ? routes.some(route => route.provider === configured.provider && route.model === configured.model) : same;
+    signal?.throwIfAborted();
+    return routeAuthorization(configured, delegationSelection(agent), routes, !!agent, explicit);
   }
   private async resolveConfig(configured: EffectiveSelection, signal?: AbortSignal): Promise<EffectiveSelection> {
     const { reasoningEffort, ...config } = configured;
@@ -158,7 +167,8 @@ export class AgentDeckController {
     if (!parent) throw new Error('The calling Session has no effective model. Configure a native model before delegating.');
     const choice = roleChoice(role, parent, request, requireRevision);
     const configured = choice.configured!;
-    if (!await this.authorized(configured, agent, choice.explicit, signal)) throw new Error(`The effective role route ${configured.provider}/${configured.model} is not authorized by this Session. Native delegation will not be bypassed.`);
+    const authorization = await this.authorization(configured, agent, choice.explicit, signal);
+    if (authorization.status !== 'authorized') throw new ModelAuthorizationError(authorization);
     const llm = this.ctx.get('llm') as any;
     if (!llm) throw new Error('Native model runtime is unavailable.');
     const effective = await this.resolveConfig(configured, signal);
@@ -174,8 +184,7 @@ export class AgentDeckController {
     return { id: role.id, revision: agentRevision(role), mode: role.model.mode, defaultCandidate: role.model.defaultCandidate,
       candidates: (role.model.candidates ?? []).map(candidate => ({ id: candidate.id, purpose: candidate.purpose, provider: candidate.provider, model: candidate.model,
         reasoning: candidate.reasoning, maxTokens: candidate.maxTokens,
-        authorization: !agent ? 'unknown' : (routes ? routes.some(route => route.provider === candidate.provider && route.model === candidate.model)
-          : parent?.provider === candidate.provider && parent?.model === candidate.model) ? 'authorized' : 'denied' })) };
+        authorization: routeAuthorization(candidate, parent, routes, !!agent, true).status })) };
   }
   async preview(id: string, agent?: RuntimeAgent, signal = new AbortController().signal, request: JsonObject = {}): Promise<JsonObject> {
     signal.throwIfAborted();
@@ -186,31 +195,27 @@ export class AgentDeckController {
     const diagnostics: string[] = [];
     let choice: ReturnType<typeof roleChoice>;
     try { choice = roleChoice(role, delegationSelection(agent), request); }
-    catch (error) { return { agent: view, budget: admissionBudget(role.context), authorization: { status: 'unknown' }, output: { source: 'unknown', validated: false }, capacity: { kind: 'unknown', assemblyChecked: false }, diagnostics: [messageOf(error)] }; }
+    catch (error) { const authorization = { status: 'unknown' }; return { agent: { ...view, capabilitiesAvailable: view.available, available: false, authorization }, budget: admissionBudget(role.context), authorization, output: { source: 'unknown', validated: false }, capacity: { kind: 'unknown', assemblyChecked: false }, diagnostics: [messageOf(error)] }; }
     const configured = choice.configured;
     let metadata: JsonObject | undefined;
     let effective: EffectiveSelection | undefined;
-    let status = 'unknown';
-    let authorizationMessage: string | undefined;
+    const authorization = await this.authorization(configured, agent, choice.explicit, signal);
     if (configured) {
       try { metadata = await this.ctx.llm.resolveModelInfo(configured.provider, configured.model, signal); }
       catch (error) { signal.throwIfAborted(); diagnostics.push(`Model declaration: ${messageOf(error)}`); }
       if (agent) {
-        if (!await this.authorized(configured, agent, choice.explicit, signal)) {
-          status = 'denied';
-          authorizationMessage = `The effective role route ${configured.provider}/${configured.model} is not authorized by this Session. Native delegation will not be bypassed.`;
-          diagnostics.push(authorizationMessage);
+        if (authorization.status !== 'authorized') {
+          if (authorization.message) diagnostics.push(authorization.message);
         } else {
-          status = 'authorized';
           try { effective = await this.resolveConfig(configured, signal); }
           catch (error) { signal.throwIfAborted(); diagnostics.push(`Native parameter validation: ${messageOf(error)}`); }
         }
       } else diagnostics.push('Select a live Session to validate authorization and effective output parameters. Model declarations and configured capacity are not task admission.');
     } else diagnostics.push('Select a live Session to resolve inherited model parameters.');
     const outputTokens = effective?.maxTokens ?? configured?.maxTokens ?? metadata?.defaultMaxTokens;
-    return { agent: view, ...(metadata ? { model: modelView(metadata, agent ? status === 'authorized' : null) } : {}),
+    return { agent: this.selectionView(view, choice, authorization), ...(metadata ? { model: modelView(metadata, agent ? authorization.status === 'authorized' : null) } : {}),
       ...(configured ? { configuredSelection: configured } : {}), ...(effective ? { effectiveSelection: effective } : {}), sessionSelection: currentSelection(agent),
-      authorization: { status, ...(authorizationMessage ? { message: authorizationMessage } : {}) },
+      authorization,
       output: { configuredMaxTokens: configured?.maxTokens, effectiveMaxTokens: effective?.maxTokens ?? (effective ? metadata?.defaultMaxTokens : undefined),
         source: choice.outputSource === 'unknown' && outputTokens !== undefined ? 'native-default' : choice.outputSource, validated: effective !== undefined },
       capacity: { kind: effective ? 'validated-parameters' : metadata && outputTokens !== undefined ? 'configured' : 'unknown', assemblyChecked: false },
