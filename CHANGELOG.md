@@ -2,11 +2,17 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.2.6 — Localized setup and consistent readiness
+
+- Add owner-only model setup with a selected default route, an optional image route, editable suggestions and explicit per-role apply results.
+- Resolve the exact selected inheritance combination before applying, show impacts on read-only descendants and retain serial revision checks without automatic write replay.
+- Share matching readiness evidence across role lists and details; invalidate stale previews, setup scopes and canceled apply readback on catalog or Session changes.
+- Complete English/Chinese role contracts, skills and diagnostic presentation from one locale source while preserving custom text and native authorization.
+
 ## 0.2.5 — Session authorization and readiness fixes
 
 - Add a version-tag Release workflow that tests and packs before publishing the same archive to npm through OIDC and attaching it to GitHub Releases with checksums.
 - Add bilingual Release installation and maintainer instructions, including immutable-version checks, reruns and source-aligned npm provenance.
-
 - Include the saved default model's Session authorization in role discovery, detail previews and availability filters; keep capability readiness separate from model authorization.
 - Preserve matching live browser readiness in the list without confusing a selected candidate's authorization with the saved default route.
 - Report a stable model-denial code, allowed explicit routes and owner recovery steps before creating a child. Preserve native validation, saved model choices and running task revisions.

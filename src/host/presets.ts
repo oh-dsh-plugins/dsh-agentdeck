@@ -13,8 +13,8 @@ export class SnapshotPresets {
       const canWrite = snapshot.role.capabilities.some(capability => capability === 'source-edit' || capability === 'artifact-write');
       const definition = {
         id: snapshot.presetId,
-        name: `${snapshot.role.title.en} · AgentDeck`,
-        description: snapshot.role.description.en,
+        name: `${snapshot.role.title.zh} / ${snapshot.role.title.en} · AgentDeck`,
+        description: `${snapshot.role.description.zh} / ${snapshot.role.description.en}`,
         order: 1000,
         plugins: [
           ...(snapshot.composition === 'native-minimal' ? [] : [

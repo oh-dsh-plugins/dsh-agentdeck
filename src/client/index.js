@@ -5,177 +5,7 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
     const NS = 'agentdeck';
-    const dictionaries = {
-      en: {
-        title: 'AgentDeck', intro: 'Ready-to-use agents, with your own settings.',
-        roles: 'Agents', runs: 'Tasks and results', diagnostics: 'Diagnostics', refresh: 'Refresh',
-        compatibilityVersion: 'Compatible DSH version', requestTimeout: 'The read request took more than 15 seconds. Retry when the Host is ready. Your drafts are preserved.',
-        loading: 'Loading…', retry: 'Retry', search: 'Search agents', searchHint: 'Name, description or capability',
-        noRoles: 'No agents match this search.', noCatalog: 'Agent definitions could not be loaded.',
-        chooseRole: 'Choose an agent to see its settings.', builtin: 'Factory', custom: 'Custom', override: 'Customized',
-        enabled: 'Enabled', disabled: 'Disabled', available: 'Available for this Session', unavailable: 'Missing capabilities',
-        modelDenied: 'Default model not authorized', selectedModelDenied: 'Selected model not authorized', capabilityUnknown: 'Capabilities unverified',
-        modelDeniedHint: 'The selected model {route} is not authorized for this Session.',
-        allowedRoutes: 'Allowed explicit models: {routes}',
-        authorizationRecovery: 'Choose an allowed model here and save, or configure native /model-selection-settings and create a new Session. Changes to native authorization settings do not update an existing Session.',
-        missing: 'Missing: {items}', revision: 'Revision', session: 'Session context', noSession: 'No Session selected',
-        sessionHint: 'Select a Session to see its actual model authorization. This does not grant access.',
-        newRole: 'New agent', derive: 'Derive agent', import: 'Import YAML', export: 'Export YAML',
-        newTitle: 'Create an agent', newHint: 'Start from an existing agent. The Host validates the complete definition when you save.',
-        id: 'Agent id', idHint: 'Use a unique lowercase id, for example project-reviewer.', base: 'Based on',
-        create: 'Create agent', cancel: 'Cancel', importHint: 'Review the imported YAML and confirm its agent id before saving.',
-        yaml: 'YAML override', yamlHint: 'Edit the complete override. JSON syntax is also valid YAML. Saving applies to new tasks.',
-        yamlLocked: 'Save or discard this YAML draft before using the structured controls.',
-        save: 'Save changes', saving: 'Saving…', saved: 'Saved. New tasks use this revision.', dirty: 'Unsaved changes',
-        drafts: '{count} unsaved drafts', discard: 'Discard draft', discardConfirm: 'Discard the unsaved changes for this agent?',
-        saveError: 'Could not save. Your draft is preserved.', reset: 'Reset customization',
-        deleteCustom: 'Delete custom agent', resetConfirm: 'Reset this customization? New tasks will use the factory definition.',
-        deleteConfirm: 'Delete this custom agent? Its running tasks keep their pinned revision.',
-        confirmReset: 'Confirm reset', confirmDelete: 'Confirm delete', resetDone: 'Customization removed.',
-        newStarts: 'Changes apply to new tasks. Running tasks keep their original revision.',
-        model: 'Model', modelMode: 'Model selection', inherit: 'Inherit current model', fixed: 'Use a specific model',
-        provider: 'Provider', chooseProvider: 'Choose a provider', chooseModel: 'Choose a model',
-        effectiveModel: 'Effective model', effort: 'Reasoning effort', inheritEffort: 'Inherit when compatible',
-        defaultEffort: 'Model default', fixedEffort: 'Specific effort', effortMode: 'Effort selection', chooseEffort: 'Choose an effort',
-        authorization: 'Model authorization', authorized: 'Authorized for this Session', denied: 'Not authorized for this Session',
-        authorizationUnknown: 'Authorization unknown', policySession: 'Session authorization', policyParent: 'Parent model only',
-        policyNone: 'No selection', metadataUnavailable: 'Model metadata is unavailable.', unknown: 'Unknown', none: 'None',
-        contextWindow: 'Context window', maxOutput: 'Default maximum output', modalities: 'Input modalities',
-        budget: 'Context budget', target: 'Target tokens', elastic: 'Elastic tokens', safeInput: 'Safe input tokens',
-        headroom: 'Reserved headroom', material: 'Material allowance', budgetHint: 'Preview uses the saved agent and actual model metadata.',
-        unknownBudget: 'The model context window is unknown. Safe capacity cannot be calculated.',
-        previewDraft: 'Save this draft to preview its effective budget.', capabilities: 'Capabilities',
-        skills: 'Skills', scripts: 'Scripts', inputs: 'Inputs', deliverables: 'Deliverables', instructions: 'Instructions',
-        scope: 'Agent requirements', noRuns: 'No AgentDeck tasks in this scope.', runsHint: 'Native status and business outcome are shown separately. Idle alone does not mean completed.',
-        description: 'Task', phase: 'Start state', nativeStatus: 'Native status', businessStatus: 'Business outcome',
-        starting: 'Starting', accepted: 'Accepted', uncertain: 'Uncertain', failed: 'Failed',
-        results: 'View result', noChild: 'No accepted child Session', result: 'Task result', closeResult: 'Close result',
-        summary: 'Summary', evidence: 'Evidence', coverage: 'Coverage', artifacts: 'Artifacts', limitations: 'Limitations',
-        rawText: 'Result text', loadMore: 'Load more', resultEmpty: 'No result text is available yet.',
-        usage: 'Usage', nativeStop: 'Native stop reason', child: 'Child Session', parent: 'Parent Session', created: 'Created',
-        resultCharacters: '{loaded} of {total} characters loaded', noDiagnostics: 'No diagnostics reported.',
-        runtime: 'Runtime', nativeProvider: 'Native delegation provider', storage: 'Plugin storage', yes: 'Available', no: 'Unavailable',
-        importTooLarge: 'Import is limited to 1 MiB. Your existing drafts are preserved.', importReadError: 'Could not read this file.',
-        invalidId: 'Enter an agent id before saving.', missingRevision: 'Refresh this agent before replacing an existing customization.',
-        requestFailed: 'Request failed', malformedResponse: 'The Host returned an invalid operation response.',
-        duplicateId: 'This id already exists. Select that agent to edit it, or choose a new id.',
-        unsavedImport: 'Imported YAML is staged locally. Review and save to apply it.',
-        exportFailed: 'Could not export this draft.', count: '{count} agents', filterAll: 'All agents', filterEnabled: 'Enabled only',
-        filterUnavailable: 'Unavailable or unverified', roleFilter: 'Filter agents', errorDetails: 'Error details',
-        fileRead: 'Reading YAML…', source: 'Source', generalFallback: 'General fallback',
-        leaveDrafts: 'You have unsaved AgentDeck drafts.', sessionEffort: 'Current Session effort',
-        effectiveEffort: 'Effective reasoning effort', effectiveHint: 'Configured values describe the saved agent. Validated values reflect the selected Session.',
-        existingNewDraft: 'Your previous new-agent draft is preserved. Continue editing it or discard it before starting another.',
-        draftConflict: 'This agent already has unsaved changes. Save or discard that draft before importing.',
-        'cap.files-read': 'Read files', 'cap.source-edit': 'Edit source', 'cap.project-runner': 'Run project commands',
-        'cap.web-research': 'Web research', 'cap.browser-observe': 'Observe browser', 'cap.browser-interact': 'Interact with browser',
-        'cap.data-query': 'Query data', 'cap.artifact-write': 'Write artifacts'
-      },
-      zh: {
-        title: '代理工具箱', intro: '开箱即用的代理，也可按需定制。',
-        roles: '代理', runs: '任务与结果', diagnostics: '诊断', refresh: '刷新',
-        compatibilityVersion: '兼容的 DSH 版本', requestTimeout: '读取请求超过 15 秒，请在宿主就绪后重试。草稿已保留。',
-        loading: '正在加载…', retry: '重试', search: '搜索代理', searchHint: '名称、描述或能力',
-        noRoles: '没有匹配的代理。', noCatalog: '无法加载代理定义。',
-        chooseRole: '选择代理以查看设置。', builtin: '出厂预设', custom: '自定义', override: '已定制',
-        enabled: '已启用', disabled: '已停用', available: '可用于此会话', unavailable: '缺少能力',
-        modelDenied: '默认模型未授权', selectedModelDenied: '所选模型未授权', capabilityUnknown: '能力待验证',
-        modelDeniedHint: '所选模型 {route} 未获此会话授权。',
-        allowedRoutes: '允许显式选择的模型：{routes}',
-        authorizationRecovery: '可在此选择已授权模型并保存，或通过原生 /model-selection-settings 配置授权后新建会话。修改原生授权设置不会更新已有会话。',
-        missing: '缺少：{items}', revision: '版本', session: '会话上下文', noSession: '未选择会话',
-        sessionHint: '选择会话以查看其实际模型授权。此操作不会授予权限。',
-        newRole: '新建代理', derive: '派生代理', import: '导入 YAML', export: '导出 YAML',
-        newTitle: '创建代理', newHint: '从现有代理开始。保存时由 Host 校验完整定义。',
-        id: '代理标识', idHint: '使用唯一的小写标识，例如 project-reviewer。', base: '基于代理',
-        create: '创建代理', cancel: '取消', importHint: '保存前请检查导入的 YAML，并确认代理标识。',
-        yaml: 'YAML 覆盖配置', yamlHint: '编辑完整覆盖配置；JSON 也是有效 YAML。保存后对新任务生效。',
-        yamlLocked: '请先保存或丢弃这份 YAML 草稿，再使用结构化控件。',
-        save: '保存修改', saving: '正在保存…', saved: '已保存。新任务将使用此版本。', dirty: '有未保存修改',
-        drafts: '{count} 份未保存草稿', discard: '丢弃草稿', discardConfirm: '丢弃此代理尚未保存的修改？',
-        saveError: '保存失败，草稿已保留。', reset: '重置定制',
-        deleteCustom: '删除自定义代理', resetConfirm: '重置此定制？新任务将使用出厂定义。',
-        deleteConfirm: '删除此自定义代理？运行中的任务会保留原有版本。',
-        confirmReset: '确认重置', confirmDelete: '确认删除', resetDone: '已移除定制。',
-        newStarts: '修改对新任务生效；运行中的任务保留原有版本。',
-        model: '模型', modelMode: '模型选择', inherit: '继承当前模型', fixed: '指定模型',
-        provider: '提供商', chooseProvider: '选择提供商', chooseModel: '选择模型',
-        effectiveModel: '实际生效模型', effort: '推理强度', inheritEffort: '兼容时继承',
-        defaultEffort: '模型默认', fixedEffort: '指定强度', effortMode: '强度选择', chooseEffort: '选择推理强度',
-        authorization: '模型授权', authorized: '此会话已授权', denied: '此会话未授权',
-        authorizationUnknown: '授权未知', policySession: '会话授权', policyParent: '仅父代理模型',
-        policyNone: '未选择模型', metadataUnavailable: '模型元数据不可用。', unknown: '未知', none: '无',
-        contextWindow: '上下文窗口', maxOutput: '默认最大输出', modalities: '输入形式',
-        budget: '上下文预算', target: '目标词元数', elastic: '弹性词元数', safeInput: '安全输入词元数',
-        headroom: '预留余量', material: '材料额度', budgetHint: '预览使用已保存的代理配置与实际模型元数据。',
-        unknownBudget: '模型上下文窗口未知，无法计算安全容量。',
-        previewDraft: '保存草稿后可预览其实际预算。', capabilities: '能力',
-        skills: '技能', scripts: '脚本', inputs: '输入', deliverables: '交付物', instructions: '指令',
-        scope: '代理需求', noRuns: '此范围内暂无 AgentDeck 任务。', runsHint: '原生状态与业务结果分别展示；空闲不代表任务完成。',
-        description: '任务', phase: '启动状态', nativeStatus: '原生状态', businessStatus: '业务结果',
-        starting: '启动中', accepted: '已接受', uncertain: '待确认', failed: '失败',
-        results: '查看结果', noChild: '尚无已接受的子会话', result: '任务结果', closeResult: '关闭结果',
-        summary: '摘要', evidence: '证据', coverage: '覆盖情况', artifacts: '产物', limitations: '限制',
-        rawText: '结果原文', loadMore: '加载更多', resultEmpty: '暂无结果原文。',
-        usage: '用量', nativeStop: '原生停止原因', child: '子会话', parent: '父会话', created: '创建时间',
-        resultCharacters: '已加载 {loaded} / {total} 个字符', noDiagnostics: '未报告诊断信息。',
-        runtime: '运行环境', nativeProvider: '原生委派提供方', storage: '插件存储', yes: '可用', no: '不可用',
-        importTooLarge: '导入文件上限为 1 MiB，现有草稿已保留。', importReadError: '无法读取此文件。',
-        invalidId: '保存前请输入代理标识。', missingRevision: '替换现有定制前请先刷新此代理。',
-        requestFailed: '请求失败', malformedResponse: 'Host 返回了无效的操作响应。',
-        duplicateId: '此标识已存在。请选择该代理进行编辑，或使用新标识。',
-        unsavedImport: 'YAML 已暂存于本地，检查并保存后生效。',
-        exportFailed: '无法导出此草稿。', count: '{count} 个代理', filterAll: '全部代理', filterEnabled: '仅已启用',
-        filterUnavailable: '不可用或待验证', roleFilter: '筛选代理', errorDetails: '错误详情',
-        fileRead: '正在读取 YAML…', source: '来源', generalFallback: '通用兜底',
-        leaveDrafts: '代理工具箱中有未保存的草稿。', sessionEffort: '当前会话推理强度',
-        effectiveEffort: '实际生效推理强度', effectiveHint: '配置值对应已保存代理，已校验值对应当前选中的会话。',
-        existingNewDraft: '已保留上一份新代理草稿。请继续编辑，或丢弃后再新建。',
-        draftConflict: '此代理已有未保存修改，请先保存或丢弃现有草稿再导入。',
-        'cap.files-read': '读取文件', 'cap.source-edit': '编辑源码', 'cap.project-runner': '执行项目命令',
-        'cap.web-research': '网络研究', 'cap.browser-observe': '观察浏览器', 'cap.browser-interact': '操作浏览器',
-        'cap.data-query': '查询数据', 'cap.artifact-write': '写入产物'
-      }
-    };
-
-    dictionaries.en.capabilityPending = 'Dynamic capability not checked during this page read: {items}. The child resolves its actual tools before use.';
-    dictionaries.zh.capabilityPending = '本次页面读取未检查动态能力：{items}。子代理会在使用前解析实际工具。';
-    Object.assign(dictionaries.en, {
-      auto: 'Choose from candidates', candidates: 'Model candidates', candidate: 'Candidate {number}', candidateId: 'Candidate id',
-      candidatePurpose: 'When to use this candidate', addCandidate: 'Add candidate', removeCandidate: 'Remove candidate',
-      defaultCandidate: 'Default candidate', previewCandidate: 'Preview candidate', autoHint: 'Configure up to 3 candidates. Each owns its reasoning effort and output cap. The default is used unless a task selects another candidate.',
-      candidateHint: 'Choose a configured provider and model. Lists load as you use each candidate; preview reads only the selected saved candidate.',
-      unavailableOption: '{value} (unavailable)', uncheckedOption: '{value} (not checked)', noModelOptions: 'This provider has no configured models. Choose another provider or configure a model in DSH.',
-      outputCap: 'Output token cap', outputCapHint: 'Leave blank to use the parent or native default. A cap applies to new tasks.',
-      configuredModel: 'Configured model', configuredEffort: 'Configured reasoning effort', configuredOutput: 'Configured output cap',
-      effectiveOutput: 'Validated output cap', outputSource: 'Output cap source', outputValidated: 'Native parameters validated', validationPassed: 'Validated', validationPending: 'Pending',
-      outputPending: 'Output parameters have not been validated for this Session.', assemblyPending: 'Actual fit is pending real child Session assembly.',
-      capacity: 'Capacity estimate', capacityConfigured: 'Configured values', capacityValidated: 'Validated parameters',
-      sourceCandidate: 'Candidate', sourceRole: 'Agent', sourceParent: 'Parent', sourceNative: 'Native default',
-      browserSupport: 'Browser support', browserReady: 'Ready', browserUnverified: 'Unverified', browserUnsupported: 'Unsupported',
-      invalidForm: 'Complete the configuration below before saving.', invalidRoute: 'Enter both provider and model ids.',
-      invalidEffort: 'Choose a reasoning effort.', invalidOutput: 'Use a whole output cap from 1 to 16777216 tokens, or leave it blank.',
-      invalidCandidates: 'Use 1–3 candidates with unique lowercase ids and choose an existing default.',
-      invalidCandidate: 'Candidate {number}: enter a lowercase id (up to 64 characters), a purpose (1–240 characters), provider, model, a whole cap from 1 to 16777216, and an effort when using specific effort.'
-    });
-    Object.assign(dictionaries.zh, {
-      auto: '从候选中选择', candidates: '模型候选', candidate: '候选 {number}', candidateId: '候选标识',
-      candidatePurpose: '此候选适用的任务', addCandidate: '添加候选', removeCandidate: '移除候选',
-      defaultCandidate: '默认候选', previewCandidate: '预览候选', autoHint: '最多配置 3 个候选，各自拥有推理强度和输出上限。任务未选择其他候选时使用默认候选。',
-      candidateHint: '选择已配置的提供商与模型。使用候选时按需加载列表，预览仅读取当前选中的已保存候选。',
-      unavailableOption: '{value}（不可用）', uncheckedOption: '{value}（未检查）', noModelOptions: '此提供商尚无已配置模型。请选择其他提供商，或在 DSH 中配置模型。',
-      outputCap: '输出词元上限', outputCapHint: '留空时使用父会话或原生默认值；上限对新任务生效。',
-      configuredModel: '配置模型', configuredEffort: '配置推理强度', configuredOutput: '配置输出上限',
-      effectiveOutput: '已校验输出上限', outputSource: '输出上限来源', outputValidated: '原生参数已校验', validationPassed: '已校验', validationPending: '待校验',
-      outputPending: '尚未为此会话校验输出参数。', assemblyPending: '实际容量是否适合仍需在真实子会话组装时检查。',
-      capacity: '容量估计依据', capacityConfigured: '配置值', capacityValidated: '已校验参数',
-      sourceCandidate: '候选', sourceRole: '代理', sourceParent: '父会话', sourceNative: '原生默认',
-      browserSupport: '浏览器支持', browserReady: '就绪', browserUnverified: '未验证', browserUnsupported: '不支持',
-      invalidForm: '请先补全下方配置，再保存。', invalidRoute: '请填写提供商与模型标识。',
-      invalidEffort: '请选择推理强度。', invalidOutput: '输出上限须为 1 至 16777216 的整数，或留空。',
-      invalidCandidates: '请配置 1 至 3 个标识唯一的小写候选，并选择已有候选作为默认值。',
-      invalidCandidate: '候选 {number}：请填写小写标识（最多 64 字符）、用途（1 至 240 字符）、提供商、模型、1 至 16777216 的整数输出上限；指定推理强度时还须填写强度。'
-    });
+    const dictionaries = /* AGENTDECK_LOCALES */ null;
     const definitionKeys = ['schemaVersion', 'id', 'title', 'description', 'instructions', 'capabilities', 'skills', 'scripts', 'inputs', 'deliverables', 'model', 'reasoning', 'output', 'context', 'enabled', 'extends'];
     function definitionOf(agent) {
       return Object.fromEntries(definitionKeys.filter(key => agent[key] !== undefined).map(key => [key, agent[key]]));
@@ -244,6 +74,7 @@ window.__ModuleLoader__.load({
       let disposed = false;
       let state = {
         catalog: null, selectedId: '', sessionId: '', tab: 'roles', drafts: {},
+        evidence: {}, setupOpen: false, setupOptions: { defaultRoute: { provider: '', model: '' }, imageRoute: { provider: '', model: '' }, includeBrowser: true, roleIds: [] }, setupProposal: null, setupSelected: {}, setupPreviewReady: false, setupResult: null,
         models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, previewCandidates: {}, runs: null, result: null, resultChild: '',
         creating: false, newId: '', newBase: 'general', imported: false,
         errors: {}, busy: {}, notice: ''
@@ -272,7 +103,7 @@ window.__ModuleLoader__.load({
         let timer;
         let abort;
         let timedOut = false;
-        const readOnly = ['catalog', 'models', 'modelOptions', 'preview', 'runs', 'result'].includes(endpoint);
+        const readOnly = ['catalog', 'models', 'modelOptions', 'preview', 'recommend', 'previewSetup', 'runs', 'result'].includes(endpoint);
         try {
           const call = connection.rpc.call('/agentdeck', 'agentdeck.' + endpoint, payload, controller.signal);
           const result = await (readOnly ? Promise.race([call, new Promise((_, reject) => {
@@ -317,6 +148,10 @@ window.__ModuleLoader__.load({
         if (!state.drafts[id]) publish({ drafts: { ...state.drafts, [id]: makeDraft(id) } });
       }
       async function loadCatalog() {
+        invalidateSetup();
+        requests.get('preview')?.abort(); requests.delete('preview');
+        previewReadKey = undefined;
+        publish({ preview: null, evidence: {}, busy: { ...state.busy, preview: false } });
         return request('catalog', 'catalog', sessionPayload(), catalog => {
           const drafts = { ...state.drafts };
           const overrideById = new Map(catalog.overrides.map(item => [item.id, item]));
@@ -332,7 +167,9 @@ window.__ModuleLoader__.load({
           }
           const ids = new Set([...catalog.agents.map(agent => agent.id), ...catalog.overrides.map(item => item.id), ...Object.keys(drafts).filter(id => id !== '@new' && isDirty(drafts[id]))]);
           const selectedId = ids.has(state.selectedId) ? state.selectedId : (catalog.agents[0]?.id || catalog.overrides[0]?.id || '');
-          publish({ catalog, drafts, selectedId });
+          const setupIds = new Set(catalog.agents.map(agent => agent.id));
+          const setupOptions = { ...state.setupOptions, roleIds: state.setupOptions.roleIds.filter(id => setupIds.has(id)) };
+          publish({ catalog, drafts, selectedId, setupOptions, evidence: {} });
         });
       }
       function select(id) { ensureDraft(id); publish({ selectedId: id, creating: false, preview: null, notice: '' }); }
@@ -547,8 +384,13 @@ window.__ModuleLoader__.load({
         return model?.mode === 'auto' ? (model.candidates.some(item => item.id === state.previewCandidates[id]) ? state.previewCandidates[id] : model.defaultCandidate) : undefined;
       }
       function loadPreview(id, candidateId = previewCandidate(id), revision = findAgent(id)?.revision) {
-        publish({ preview: null });
-        return request('preview', 'preview', { id, ...sessionPayload(), ...(revision ? { revision } : {}), ...(candidateId ? { candidateId } : {}) }, preview => publish({ preview }));
+        const context = state.sessionId;
+        const evidence = { ...state.evidence }; delete evidence[id];
+        publish({ preview: null, evidence });
+        return request('preview', 'preview', { id, ...sessionPayload(), ...(revision ? { revision } : {}), ...(candidateId ? { candidateId } : {}) }, preview => {
+          if (context !== state.sessionId || revision !== findAgent(id)?.revision) return;
+          publish({ preview, evidence: { ...state.evidence, [id]: { context, candidateId, preview } } });
+        });
       }
       function syncReads(force = false) {
         if (refreshing || !state.catalog || disposed) return Promise.resolve([]);
@@ -577,10 +419,11 @@ window.__ModuleLoader__.load({
         return Promise.all(reads);
       }
       async function refresh() {
+        if (state.busy.applySetup) return { ok: false };
         refreshing = true;
         cancelModelReads();
         requests.get('preview')?.abort(); requests.delete('preview');
-        publish({ preview: null, busy: { ...state.busy, preview: false }, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false });
+        publish({ preview: null, evidence: {}, busy: { ...state.busy, preview: false }, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false });
         try {
           const answer = await loadCatalog();
           if (answer.ok && !disposed) { refreshing = false; await syncReads(true); }
@@ -588,10 +431,77 @@ window.__ModuleLoader__.load({
         } finally { refreshing = false; }
       }
       function setSession(sessionId) {
+        if (state.busy.applySetup) return;
+        invalidateSetup();
         cancelModelReads();
         modelReadKey = previewReadKey = undefined;
         for (const key of ['catalog', 'preview', 'runs', 'result']) { requests.get(key)?.abort(); requests.delete(key); }
-        publish({ sessionId, catalog: null, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, runs: null, result: null, resultChild: '', errors: {}, busy: {} });
+        publish({ sessionId, catalog: null, evidence: {}, setupResult: null, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, runs: null, result: null, resultChild: '', errors: {}, busy: {} });
+      }
+      function invalidateSetup() {
+        for (const key of ['recommend', 'setupPreview']) { requests.get(key)?.abort(); requests.delete(key); }
+        publish({ setupProposal: null, setupSelected: {}, setupPreviewReady: false, errors: { ...state.errors, setupPreview: null }, busy: { ...state.busy, recommend: false, setupPreview: false } });
+      }
+      function updateSetup(patch) {
+        if (state.busy.applySetup) return;
+        invalidateSetup();
+        publish({ setupOptions: { ...state.setupOptions, ...patch }, setupResult: null });
+      }
+      function openSetup() {
+        if (!state.setupOptions.roleIds.length) updateSetup({ roleIds: state.catalog?.agents.map(agent => agent.id) || [] });
+        publish({ setupOpen: true }); void loadProviders();
+      }
+      async function recommendSetup() {
+        if (state.busy.applySetup) return { ok: false };
+        const options = state.setupOptions;
+        const catalog = state.catalog;
+        invalidateSetup(); publish({ setupResult: null });
+        const { imageRoute, ...payload } = options;
+        const answer = await request('recommend', 'recommend', { ...payload, ...(imageRoute.provider && imageRoute.model ? { imageRoute } : {}), ...sessionPayload() }, value => {
+          if (options !== state.setupOptions || catalog !== state.catalog) return;
+          publish({ setupProposal: value, setupSelected: Object.fromEntries(value.rows.map(row => [row.id, row.applicable && !isDirty(state.drafts[row.id])])) });
+        });
+        if (answer.ok && state.setupProposal === answer.value) await previewSetup();
+        return answer;
+      }
+      async function previewSetup() {
+        const proposal = state.setupProposal, selection = state.setupSelected, catalog = state.catalog;
+        if (!proposal || state.busy.applySetup) return { ok: false };
+        requests.get('setupPreview')?.abort(); requests.delete('setupPreview');
+        publish({ setupPreviewReady: false, errors: { ...state.errors, setupPreview: null }, busy: { ...state.busy, setupPreview: false } });
+        const rows = proposal.rows.filter(row => selection[row.id] && row.applicable);
+        if (!rows.length) {
+          publish({ setupProposal: { ...proposal, rows: proposal.rows.map(row => ({ ...row, after: row.before })) }, setupPreviewReady: true });
+          return { ok: true };
+        }
+        return request('setupPreview', 'previewSetup', { rows: rows.map(row => ({ id: row.id, text: row.proposedText, roleRevision: row.roleRevision, ...(row.expectedRevision ? { expectedRevision: row.expectedRevision } : {}) })), ...sessionPayload() }, value => {
+          if (proposal !== state.setupProposal || selection !== state.setupSelected || catalog !== state.catalog) return;
+          if (proposal.rows.some(row => !value.resources?.[row.id])) throw { code: 'malformedResponse', message: 'malformedResponse' };
+          publish({ setupProposal: { ...proposal, rows: proposal.rows.map(row => ({ ...row, after: value.resources[row.id] })) }, setupPreviewReady: true });
+        });
+      }
+      function selectSetup(id, checked) {
+        if (state.busy.applySetup || !state.setupProposal?.rows.some(row => row.id === id && row.applicable) || isDirty(state.drafts[id])) return Promise.resolve({ ok: false });
+        publish({ setupSelected: { ...state.setupSelected, [id]: checked }, setupPreviewReady: false });
+        return previewSetup();
+      }
+      async function applySetup() {
+        if (!state.setupPreviewReady || state.busy.setupPreview || state.busy.applySetup || state.busy.save || state.busy.reset) return { ok: false };
+        const rows = state.setupProposal?.rows.filter(row => state.setupSelected[row.id] && row.applicable) || [];
+        if (!rows.length) return { ok: false };
+        if (rows.some(row => isDirty(state.drafts[row.id]))) { error('applySetup', { message: 'draftConflict' }); return { ok: false }; }
+        const payload = rows.map(row => ({ id: row.id, text: row.proposedText, roleRevision: row.roleRevision, ...(row.expectedRevision ? { expectedRevision: row.expectedRevision } : {}) }));
+        publish({ setupResult: null, setupProposal: null, setupPreviewReady: false });
+        const answer = await request('applySetup', 'applySetup', { rows: payload, ...sessionPayload() }, value => publish({ setupResult: value }));
+        if (disposed) return answer;
+        const readback = await loadCatalog();
+        if (!answer.ok && !readback.aborted && !disposed) publish({ setupResult: { status: 'reconciled', rows: rows.map(row => ({ id: row.id, status: readback.ok && findOverride(row.id)?.text === row.proposedText ? 'observed' : 'unknown' })) } });
+        return answer;
+      }
+      function stageSetup(id) {
+        const row = state.setupProposal?.rows.find(item => item.id === id);
+        if (!row?.proposedText || isDirty(state.drafts[id])) return;
+        ensureDraft(id); edit(id, row.proposedText); select(id); publish({ setupOpen: false });
       }
       const api = {
         getSnapshot: () => state,
@@ -599,7 +509,7 @@ window.__ModuleLoader__.load({
         activate: () => { disposed = false; },
         dispose: () => { disposed = true; modelGeneration++; for (const controller of requests.values()) controller.abort(); requests.clear(); listeners.clear(); },
         isDisposed: () => disposed,
-        set: publish, error, loadCatalog, select, edit, updateForm, setModelMode, updateCandidate, addCandidate, removeCandidate, selectPreviewCandidate, beginCreate, setNewId, setNewBase, importText, save, reset, discard, setSession,
+        set: publish, error, openSetup, updateSetup, recommendSetup, previewSetup, selectSetup, applySetup, stageSetup, loadCatalog, select, edit, updateForm, setModelMode, updateCandidate, addCandidate, removeCandidate, selectPreviewCandidate, beginCreate, setNewId, setNewBase, importText, save, reset, discard, setSession,
         loadModels, loadProviders, loadModelOptions, modelOptionsState, modelMetadataState, loadCandidateOptions, loadCandidateMetadata, setCandidateProvider, setCandidateModel, loadPreview, syncReads, refresh,
         loadRuns: () => request('runs', 'runs', sessionPayload(), value => publish({ runs: value.runs })),
         closeResult: () => { requests.get('result')?.abort(); requests.delete('result'); publish({ result: null, resultChild: '', busy: { ...state.busy, result: false }, errors: { ...state.errors, result: null } }); },
@@ -614,6 +524,7 @@ window.__ModuleLoader__.load({
       return api;
     }
 
+    function enumText(value, t) { return value && dictionaries.en['status.' + value] ? t('status.' + value) : value || t('unknown'); }
     const css = `
 .ad-root{width:100%;max-width:920px;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:1.55;container:agentdeck / inline-size}
 .ad-root *{box-sizing:border-box}.ad-root h2,.ad-root h3,.ad-root h4,.ad-root p{margin:0}.ad-root h2{font-size:20px;font-weight:600;line-height:1.4}.ad-root h3{font-size:16px;font-weight:600}.ad-root h4{font-size:13px;font-weight:600}.ad-root button,.ad-root input,.ad-root select,.ad-root textarea{font:inherit;color:inherit}.ad-root button{cursor:pointer}.ad-root button:disabled{cursor:default;opacity:.5}.ad-root :is(button,input,select,textarea,summary):focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}.ad-root ::selection{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base)}
@@ -639,16 +550,18 @@ window.__ModuleLoader__.load({
     }
     function ErrorNotice({ value, t, save, retry }) {
       if (!value) return null;
-      const message = dictionaries.en[value.message] ? t(value.message) : value.message;
+      const known = dictionaries.en[value.message] || dictionaries.en[value.code];
+      const message = known ? t(dictionaries.en[value.message] ? value.message : value.code) : t('requestFailed');
       return h('div', { className: 'ad-alert ad-error', role: 'alert' },
         save && h('p', null, t('saveError')), h('p', null, message),
+        !known && h(CodeDetail, { title: t('originalDiagnostic'), value: value.message }),
         value.code && !dictionaries.en[value.code] && h('code', null, value.code),
         value.details && h('details', null, h('summary', null, t('errorDetails')), h('pre', null, JSON.stringify(value.details, null, 2))),
         retry && h(Button, { onClick: retry }, t('retry')));
     }
     function DiagnosticList({ items, t }) {
       if (!items?.length) return null;
-      return h('ul', { className: 'ad-list ad-warning' }, items.map((item, index) => h('li', { key: index }, typeof item === 'string' ? item : [item.id, item.source, item.message].filter(Boolean).join(' · '))));
+      return h('ul', { className: 'ad-list ad-warning' }, items.map((item, index) => h('li', { key: index }, typeof item !== 'string' && dictionaries.en[item.code] ? h(React.Fragment, null, t(item.code, item.params), item.original && h(CodeDetail, { title: t('originalDiagnostic'), value: item.original })) : h('details', null, h('summary', null, [item.id, item.source, t('diagnosticNotice')].filter(Boolean).join(' · ')), h('pre', null, typeof item === 'string' ? item : item.message)))));
     }
     function CodeDetail({ title, value }) {
       if (value === undefined || value === null || (Array.isArray(value) && !value.length)) return null;
@@ -657,13 +570,16 @@ window.__ModuleLoader__.load({
     function ModelControls({ state, controller, agent, draft, t }) {
       const form = draft?.form;
       const locked = !form || (isDirty(draft) && draft.kind === 'raw');
-      const disabled = locked || state.busy.save;
+      const disabled = locked || state.busy.save || state.busy.applySetup;
       const model = form?.model || agent.model;
       const reasoning = form?.reasoning || agent.reasoning;
       const models = state.models;
       const fixed = model.mode === 'fixed';
       const auto = model.mode === 'auto';
-      const preview = state.preview?.agent.id === agent.id && state.preview?.agent.revision === agent.revision ? state.preview : undefined;
+      const cached = state.evidence[agent.id];
+      const candidateId = state.previewCandidates[agent.id] || agent.model.defaultCandidate;
+      const value = state.preview || (cached?.context === state.sessionId && cached.candidateId === candidateId ? cached.preview : null);
+      const preview = value?.agent.id === agent.id && value.agent.revision === agent.revision ? value : undefined;
       const facts = previewFacts(preview, state.sessionId);
       const route = fixed ? model : facts.configuredSelection || facts.effectiveSelection;
       const previewMatches = preview?.model?.provider === route?.provider && preview?.model?.id === route?.model;
@@ -733,7 +649,7 @@ window.__ModuleLoader__.load({
           [t('maxOutput'), exact?.defaultMaxTokens ?? t('unknown')],
           [t('defaultEffort'), exact?.defaultEffort ?? t('unknown')],
           [t('sessionEffort'), (models?.selection || preview?.sessionSelection)?.reasoningEffort ?? t('unknown')],
-          [t('modalities'), exact?.inputModalities?.join(', ') || t('unknown')]
+          [t('modalities'), exact?.inputModalities?.map(value => dictionaries.en['modality.' + value] ? t('modality.' + value) : value).join(', ') || t('unknown')]
         ] }),
         facts.authorization.code === 'AGENTDECK_MODEL_NOT_AUTHORIZED'
           ? h('div', { className: 'ad-warning', role: 'alert' },
@@ -750,7 +666,9 @@ window.__ModuleLoader__.load({
     function RoleDetail({ state, controller, t, locale, exportDraft }) {
       const [confirmation, setConfirmation] = React.useState('');
       React.useEffect(() => setConfirmation(''), [state.selectedId]);
-      const agent = roleView(state.catalog?.agents.find(item => item.id === state.selectedId), state.preview);
+      const cached = state.evidence[state.selectedId];
+      const currentPreview = state.preview || (cached?.context === state.sessionId && cached.candidateId === (state.previewCandidates[state.selectedId] || state.catalog?.agents.find(item => item.id === state.selectedId)?.model.defaultCandidate) ? cached.preview : null);
+      const agent = roleView(state.catalog?.agents.find(item => item.id === state.selectedId), currentPreview);
       const draft = state.drafts[state.selectedId];
       const override = state.catalog?.overrides.find(item => item.id === state.selectedId);
       if (!draft) return h('p', { className: 'ad-empty' }, t('chooseRole'));
@@ -758,7 +676,7 @@ window.__ModuleLoader__.load({
       const form = draft.form;
       const locked = !form || (dirty && draft.kind === 'raw');
       const localized = value => locale.resolveText(value);
-      const preview = state.preview?.agent.id === agent?.id && state.preview?.agent.revision === agent?.revision ? state.preview : null;
+      const preview = currentPreview?.agent.id === agent?.id && currentPreview?.agent.revision === agent?.revision ? currentPreview : null;
       const facts = previewFacts(preview, state.sessionId);
       const invalidForm = draft.kind === 'form' && formIssues(form).length > 0;
       const resetCustom = agent && !agent.builtin;
@@ -774,16 +692,17 @@ window.__ModuleLoader__.load({
           agent.id === 'general' && h('span', { className: 'ad-tag' }, t('generalFallback'))),
         agent?.missingCapabilities.length > 0 && h('p', { className: 'ad-warning' }, t('missing', { items: agent.missingCapabilities.map(id => t('cap.' + id)).join(', ') })),
         agent?.unverifiedCapabilities?.length > 0 && h('p', { className: 'ad-help' }, t('capabilityPending', { items: agent.unverifiedCapabilities.map(id => t('cap.' + id)).join(', ') })),
-        agent?.browserSupport && h('p', { className: 'ad-help' }, t('browserSupport') + ': ' + t({ ready: 'browserReady', unverified: 'browserUnverified', unsupported: 'browserUnsupported' }[agent.browserSupport.state] || 'unknown') + (agent.browserSupport.reason ? ' · ' + agent.browserSupport.reason : '')),
+        agent?.browserSupport && h('p', { className: 'ad-help' }, t('browserSupport') + ': ' + t({ ready: 'browserReady', unverified: 'browserUnverified', unsupported: 'browserUnsupported' }[agent.browserSupport.state] || 'unknown') + ' · ' + t({ ready: 'browserReadyHint', unverified: 'browserUnverifiedHint', unsupported: 'browserUnsupportedHint' }[agent.browserSupport.state] || 'browserUnverifiedHint')),
+        agent?.browserSupport?.reason && h(CodeDetail, { title: t('originalDiagnostic'), value: agent.browserSupport.reason }),
         agent && h('div', { className: 'ad-section' },
-          h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', role: 'switch', 'aria-checked': form?.enabled ?? agent.enabled, checked: form?.enabled ?? agent.enabled, disabled: locked || state.busy.save, onChange: event => controller.updateForm(agent.id, { enabled: event.target.checked }) }), h('span', null, t((form?.enabled ?? agent.enabled) ? 'enabled' : 'disabled'))),
+          h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', role: 'switch', 'aria-checked': form?.enabled ?? agent.enabled, checked: form?.enabled ?? agent.enabled, disabled: locked || state.busy.save || state.busy.applySetup, onChange: event => controller.updateForm(agent.id, { enabled: event.target.checked }) }), h('span', null, t((form?.enabled ?? agent.enabled) ? 'enabled' : 'disabled'))),
           h('p', { className: 'ad-help' }, t('newStarts'))),
         agent && h(ModelControls, { state, controller, agent, draft, t }),
         agent && h('section', { className: 'ad-section', 'aria-label': t('budget') },
           h('h4', null, t('budget')), h('p', { className: 'ad-help' }, t('budgetHint')),
           h('div', { className: 'ad-fields' },
-            h(Field, { label: t('target') }, h('input', { type: 'number', min: 0, step: 1, value: form?.context.targetTokens ?? agent.context.targetTokens, disabled: locked || state.busy.save, onChange: event => controller.updateForm(agent.id, { context: { ...form.context, targetTokens: event.target.value === '' ? '' : Number(event.target.value) } }) })),
-            h(Field, { label: t('elastic') }, h('input', { type: 'number', min: 0, step: 1, value: form?.context.elasticTokens ?? agent.context.elasticTokens, disabled: locked || state.busy.save, onChange: event => controller.updateForm(agent.id, { context: { ...form.context, elasticTokens: event.target.value === '' ? '' : Number(event.target.value) } }) }))),
+            h(Field, { label: t('target') }, h('input', { type: 'number', min: 0, step: 1, value: form?.context.targetTokens ?? agent.context.targetTokens, disabled: locked || state.busy.save || state.busy.applySetup, onChange: event => controller.updateForm(agent.id, { context: { ...form.context, targetTokens: event.target.value === '' ? '' : Number(event.target.value) } }) })),
+            h(Field, { label: t('elastic') }, h('input', { type: 'number', min: 0, step: 1, value: form?.context.elasticTokens ?? agent.context.elasticTokens, disabled: locked || state.busy.save || state.busy.applySetup, onChange: event => controller.updateForm(agent.id, { context: { ...form.context, elasticTokens: event.target.value === '' ? '' : Number(event.target.value) } }) }))),
           dirty && h('p', { className: 'ad-help ad-warning' }, t('previewDraft')),
           h(ErrorNotice, { value: state.errors.preview, t, retry: () => controller.loadPreview(agent.id) }),
           state.busy.preview && h('p', { role: 'status', className: 'ad-help' }, t('loading')),
@@ -799,19 +718,66 @@ window.__ModuleLoader__.load({
           h(DiagnosticList, { items: [...(preview?.budget.diagnostics || []), ...(preview?.diagnostics || [])], t })),
         h('section', { className: 'ad-section', 'aria-label': t('yaml') },
           h('label', { className: 'ad-field' }, h('span', null, t('yaml')), h('span', { className: 'ad-help' }, t('yamlHint')),
-            h('textarea', { className: 'ad-yaml', value: draft.text, spellCheck: false, autoCapitalize: 'off', autoCorrect: 'off', onChange: event => controller.edit(state.selectedId, event.target.value) })),
+            h('textarea', { className: 'ad-yaml', value: draft.text, spellCheck: false, autoCapitalize: 'off', autoCorrect: 'off', disabled: state.busy.applySetup, onChange: event => controller.edit(state.selectedId, event.target.value) })),
           h(ErrorNotice, { value: state.errors.save, t, save: true }), h(ErrorNotice, { value: state.errors.reset, t }),
           h('div', { className: 'ad-savebar' }, h('span', { className: 'ad-help', role: 'status' }, dirty ? t('dirty') : ''), h('div', { className: 'ad-actions' },
-            dirty && h(Button, { disabled: state.busy.save || state.busy.reset, onClick: () => setConfirmation('discard') }, t('discard')),
-            h(Button, { primary: true, disabled: !dirty || invalidForm || state.busy.save || state.busy.reset, onClick: () => controller.save(state.selectedId) }, t(state.busy.save ? 'saving' : 'save')))),
-          override && h('div', { className: 'ad-actions', style: { marginTop: 12 } }, h(Button, { danger: true, disabled: state.busy.save || state.busy.reset, onClick: () => setConfirmation('reset') }, t(resetCustom ? 'deleteCustom' : 'reset'))),
-          confirmation && h('div', { className: 'ad-inline-confirm' }, h('p', null, t(confirmation === 'discard' ? 'discardConfirm' : resetCustom ? 'deleteConfirm' : 'resetConfirm')), h('div', { className: 'ad-actions' }, h(Button, { danger: true, disabled: state.busy.save || state.busy.reset, onClick: () => { if (confirmation === 'discard') { controller.discard(state.selectedId); setConfirmation(''); } else controller.reset(state.selectedId).then(answer => { if (answer.ok && !controller.isDisposed()) setConfirmation(''); }); } }, t(confirmation === 'discard' ? 'discard' : resetCustom ? 'confirmDelete' : 'confirmReset')), h(Button, { onClick: () => setConfirmation('') }, t('cancel'))))),
+            dirty && h(Button, { disabled: state.busy.save || state.busy.reset || state.busy.applySetup, onClick: () => setConfirmation('discard') }, t('discard')),
+            h(Button, { primary: true, disabled: !dirty || invalidForm || state.busy.save || state.busy.reset || state.busy.applySetup, onClick: () => controller.save(state.selectedId) }, t(state.busy.save ? 'saving' : 'save')))),
+          override && h('div', { className: 'ad-actions', style: { marginTop: 12 } }, h(Button, { danger: true, disabled: state.busy.save || state.busy.reset || state.busy.applySetup, onClick: () => setConfirmation('reset') }, t(resetCustom ? 'deleteCustom' : 'reset'))),
+          confirmation && h('div', { className: 'ad-inline-confirm' }, h('p', null, t(confirmation === 'discard' ? 'discardConfirm' : resetCustom ? 'deleteConfirm' : 'resetConfirm')), h('div', { className: 'ad-actions' }, h(Button, { danger: true, disabled: state.busy.save || state.busy.reset || state.busy.applySetup, onClick: () => { if (confirmation === 'discard') { controller.discard(state.selectedId); setConfirmation(''); } else controller.reset(state.selectedId).then(answer => { if (answer.ok && !controller.isDisposed()) setConfirmation(''); }); } }, t(confirmation === 'discard' ? 'discard' : resetCustom ? 'confirmDelete' : 'confirmReset')), h(Button, { onClick: () => setConfirmation('') }, t('cancel'))))),
         agent && h('section', { className: 'ad-section', 'aria-label': t('scope') }, h('h4', null, t('scope')),
-          h(Stats, { rows: [[t('capabilities'), agent.capabilities.map(id => t('cap.' + id)).join(', ') || t('none')], [t('skills'), agent.skills.join(', ') || t('none')], [t('scripts'), agent.scripts.join(', ') || t('none')]] }),
-          h(CodeDetail, { title: t('inputs'), value: agent.inputs }), h(CodeDetail, { title: t('deliverables'), value: agent.deliverables }), h(CodeDetail, { title: t('instructions'), value: agent.instructions }))
+          h(Stats, { rows: [[t('capabilities'), agent.capabilities.map(id => t('cap.' + id)).join(', ') || t('none')], [t('skills'), agent.presentation?.skills.map(skill => localized(skill.title)).join(', ') || agent.skills.join(', ') || t('none')], [t('scripts'), agent.scripts.join(', ') || t('none')]] }),
+          agent.presentation?.skills.map(skill => h('p', { key: skill.id, className: 'ad-help' }, localized(skill.title) + ' · ' + localized(skill.description))),
+          h(CodeDetail, { title: t('inputs'), value: agent.presentation?.inputs.map(localized) || agent.inputs }), h(CodeDetail, { title: t('deliverables'), value: agent.presentation?.deliverables.map(localized) || agent.deliverables }), h(CodeDetail, { title: t('instructions'), value: agent.instructions }))
       );
     }
-    function NewRole({ state, controller, t, exportDraft }) {
+    function SetupPanel({ state, controller, t, locale }) {
+      if (!state.setupOpen) return null;
+      const options = state.setupOptions;
+      const busy = Boolean(state.busy.applySetup);
+      const routePicker = (key, title) => {
+        const route = options[key];
+        const choices = controller.modelOptionsState(route.provider);
+        return h('fieldset', { className: 'ad-candidate', disabled: busy }, h('legend', null, title),
+          h('div', { className: 'ad-fields' },
+            h(Field, { label: t('provider') }, h('select', { value: route.provider, onFocus: () => controller.loadProviders(), onChange: event => { controller.updateSetup({ [key]: { provider: event.target.value, model: '' } }); void controller.loadModelOptions(event.target.value); } }, h('option', { value: '' }, key === 'imageRoute' ? t('setupUseDefault') : t('chooseProvider')), state.providers.map(provider => h('option', { key: provider.id, value: provider.id }, provider.name || provider.id)))),
+            h(Field, { label: t('model') }, h('select', { value: route.model, disabled: !route.provider, 'aria-busy': choices.busy, onFocus: () => controller.loadModelOptions(route.provider), onChange: event => controller.updateSetup({ [key]: { ...route, model: event.target.value } }) }, h('option', { value: '' }, choices.busy ? t('loading') : t('chooseModel')), choices.items.map(model => h('option', { key: model.id, value: model.id }, model.name || model.id))))),
+          h(ErrorNotice, { value: choices.error, t, retry: () => controller.loadModelOptions(route.provider, true) }));
+      };
+      const routeText = resources => resources?.model.mode === 'fixed' ? resources.model.provider + ' / ' + resources.model.model : t(resources?.model.mode === 'auto' ? 'auto' : 'inherit');
+      const proposal = state.setupProposal;
+      const selected = proposal?.rows.filter(row => state.setupSelected[row.id] && row.applicable).length || 0;
+      return h('section', { className: 'ad-new', 'aria-label': t('setupTitle') },
+        h('div', { className: 'ad-detail-head' }, h('h3', null, t('setupTitle')), h(Button, { disabled: busy, onClick: () => controller.set({ setupOpen: false }) }, t('close'))),
+        h('p', { className: 'ad-help' }, t('setupHint')),
+        routePicker('defaultRoute', t('setupDefaultModel')), routePicker('imageRoute', t('setupImageModel')),
+        h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.includeBrowser, disabled: busy, onChange: event => controller.updateSetup({ includeBrowser: event.target.checked }) }), t('setupBrowser')),
+        h('details', { className: 'ad-details' }, h('summary', null, t('setupScope', { count: options.roleIds.length })),
+          h(Button, { disabled: busy, onClick: () => controller.updateSetup({ roleIds: options.roleIds.length === state.catalog.agents.length ? [] : state.catalog.agents.map(agent => agent.id) }) }, t('setupToggleAll')),
+          h('div', { className: 'ad-fields' }, state.catalog.agents.map(agent => h('label', { className: 'ad-check', key: agent.id }, h('input', { type: 'checkbox', disabled: busy, checked: options.roleIds.includes(agent.id), onChange: event => controller.updateSetup({ roleIds: event.target.checked ? [...options.roleIds, agent.id] : options.roleIds.filter(id => id !== agent.id) }) }), locale.resolveText(agent.title))))),
+        h('p', { className: 'ad-help' }, t('setupLimit')),
+        h(ErrorNotice, { value: state.errors.providers, t, retry: () => controller.loadProviders(true) }),
+        h(ErrorNotice, { value: state.errors.recommend, t }),
+        h('div', { className: 'ad-actions' }, h(Button, { primary: true, disabled: busy || state.busy.recommend || !options.defaultRoute.provider || !options.defaultRoute.model || !options.roleIds.length || Boolean(options.imageRoute.provider && !options.imageRoute.model), onClick: () => controller.recommendSetup() }, t(state.busy.recommend ? 'loading' : 'setupGenerate'))),
+        proposal && h('div', { className: 'ad-section' },
+          h('h4', null, t('setupReview')), h('p', { className: 'ad-help' }, t('setupInheritance')),
+          h(DiagnosticList, { items: proposal.diagnostics, t }),
+          proposal.rows.map(row => h('article', { className: 'ad-candidate', key: row.id },
+            h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: Boolean(state.setupSelected[row.id]), disabled: busy || !row.applicable || isDirty(state.drafts[row.id]), onChange: event => { void controller.selectSetup(row.id, event.target.checked); } }), h('strong', null, locale.resolveText(row.title))),
+            h(Stats, { rows: [[t('setupBefore'), routeText(row.before)], [t('setupAfter'), !state.setupPreviewReady ? t('setupPreviewPending') : row.after ? routeText(row.after) : t('setupNotApplicable')], ...(row.after && state.setupPreviewReady ? [...(state.setupSelected[row.id] ? [[t('effort'), t('defaultEffort')]] : []), [t('target'), row.before.context.targetTokens + ' → ' + row.after.context.targetTokens], [t('elastic'), row.before.context.elasticTokens + ' → ' + row.after.context.elasticTokens]] : [])] }),
+            h(DiagnosticList, { items: [...row.reasons, ...row.warnings], t }),
+            isDirty(state.drafts[row.id]) && h('p', { className: 'ad-warning' }, t('draftConflict')),
+            row.proposedText && h(React.Fragment, null, h(CodeDetail, { title: t('setupYaml'), value: row.proposedText }), h(Button, { disabled: busy || isDirty(state.drafts[row.id]), onClick: () => controller.stageSetup(row.id) }, t('setupEdit'))))),
+          h(ErrorNotice, { value: state.errors.setupPreview, t, retry: () => controller.previewSetup() }),
+          state.busy.setupPreview && h('p', { className: 'ad-help', role: 'status', 'aria-live': 'polite' }, t('setupPreviewPending')),
+          h('p', { className: 'ad-help' }, t('setupApplyHint')),
+          h(Button, { primary: true, disabled: busy || state.busy.save || state.busy.reset || !state.setupPreviewReady || state.busy.setupPreview || !selected, onClick: () => controller.applySetup() }, t(busy ? 'saving' : 'setupApply', { count: selected }))),
+        h(ErrorNotice, { value: state.errors.applySetup, t }),
+        state.setupResult && h('div', { className: 'ad-section', role: 'status', 'aria-live': 'polite' },
+          h('h4', null, t(state.setupResult.status === 'completed' ? 'setupComplete' : state.setupResult.status === 'reconciled' ? 'setupReconciled' : 'setupStopped')),
+          h('ul', { className: 'ad-list' }, state.setupResult.rows.map(row => h('li', { key: row.id }, h('code', null, row.id), ' · ' + t('setup.status.' + row.status), row.message && h(CodeDetail, { title: t('errorDetails'), value: row.message }))))));
+    }
+    function NewRole({ state, controller, t, locale, exportDraft }) {
       const [discarding, setDiscarding] = React.useState(false);
       const draft = state.drafts['@new'];
       if (!state.creating || !draft) return null;
@@ -819,7 +785,7 @@ window.__ModuleLoader__.load({
         h('h3', null, t('newTitle')), h('p', { className: 'ad-help' }, t(state.imported ? 'importHint' : 'newHint')),
         h('div', { className: 'ad-fields' },
           h(Field, { label: t('id'), help: t('idHint') }, h('input', { value: state.newId, autoCapitalize: 'off', spellCheck: false, onChange: event => controller.setNewId(event.target.value) })),
-          !state.imported && h(Field, { label: t('base') }, h('select', { value: state.newBase, onChange: event => controller.setNewBase(event.target.value) }, state.catalog?.agents.map(agent => h('option', { key: agent.id, value: agent.id }, agent.id))))),
+          !state.imported && h(Field, { label: t('base') }, h('select', { value: state.newBase, onChange: event => controller.setNewBase(event.target.value) }, state.catalog?.agents.map(agent => h('option', { key: agent.id, value: agent.id }, locale.resolveText(agent.title) + ' · ' + agent.id))))),
         h('label', { className: 'ad-field', style: { marginTop: 12 } }, h('span', null, t('yaml')), h('textarea', { className: 'ad-yaml', value: draft.text, spellCheck: false, onChange: event => { controller.set({ imported: true }); controller.edit('@new', event.target.value); } })),
         h(ErrorNotice, { value: state.errors.save, t, save: true }),
         h('div', { className: 'ad-actions', style: { marginTop: 12 } }, h(Button, { primary: true, disabled: !state.newId.trim() || state.busy.save, onClick: () => controller.save('@new') }, t(state.busy.save ? 'saving' : 'create')), h(Button, { onClick: () => exportDraft('@new') }, t('export')), h(Button, { disabled: state.busy.save, onClick: () => controller.set({ creating: false }) }, t('cancel')), h(Button, { danger: true, disabled: state.busy.save, onClick: () => setDiscarding(true) }, t('discard'))),
@@ -833,7 +799,7 @@ window.__ModuleLoader__.load({
         state.runs?.length === 0 && h('p', { className: 'ad-empty' }, t('noRuns')),
         state.runs?.map(run => h('article', { className: 'ad-run', key: run.id },
           h('p', { className: 'ad-run-title' }, run.description),
-          h('div', { className: 'ad-run-meta' }, h('code', null, run.roleId), h('span', null, t('phase') + ': ' + t(run.phase)), h('span', null, t('nativeStatus') + ': ' + (run.nativeStatus || t('unknown'))), h('span', null, t('businessStatus') + ': ' + (run.businessStatus || t('unknown')))),
+          h('div', { className: 'ad-run-meta' }, h('code', null, run.roleId), h('span', null, t('phase') + ': ' + t(run.phase)), h('span', null, t('nativeStatus') + ': ' + enumText(run.nativeStatus, t)), h('span', null, t('businessStatus') + ': ' + enumText(run.businessStatus, t))),
           h('div', { className: 'ad-run-meta' }, h('span', null, t('revision') + ': ' + run.revision.slice(0, 12)), h('time', { dateTime: run.createdAt }, t('created') + ': ' + formatDate(run.createdAt, locale.getSnapshot().active))),
           run.model && h('p', { className: 'ad-help' }, run.model.provider + ' / ' + run.model.model + (run.model.reasoningEffort ? ' · ' + run.model.reasoningEffort : '')),
           run.error && h('p', { className: 'ad-error' }, run.error),
@@ -843,7 +809,7 @@ window.__ModuleLoader__.load({
             h(ErrorNotice, { value: state.errors.result, t }),
             state.busy.result && h('p', { role: 'status' }, t('loading')),
             state.result && h(React.Fragment, null,
-              h(Stats, { rows: [[t('nativeStatus'), state.result.status], [t('child'), state.result.childId], [t('parent'), run.parentId]] }),
+              h(Stats, { rows: [[t('nativeStatus'), enumText(state.result.status, t)], [t('child'), state.result.childId], [t('parent'), run.parentId]] }),
               h('section', { className: 'ad-section' }, h('h4', null, t('summary')), h('pre', null, typeof state.result.summary === 'string' ? state.result.summary : JSON.stringify(state.result.summary, null, 2))),
               h(CodeDetail, { title: t('evidence'), value: state.result.evidence }), h(CodeDetail, { title: t('coverage'), value: state.result.coverage }), h(CodeDetail, { title: t('artifacts'), value: state.result.artifacts }), h(CodeDetail, { title: t('limitations'), value: state.result.limitations }), h(CodeDetail, { title: t('usage'), value: state.result.usage }), h(CodeDetail, { title: t('nativeStop'), value: state.result.nativeStop }),
               h('section', { className: 'ad-section' }, h('h4', null, t('rawText')), h('pre', null, state.result.rawText || t('resultEmpty')), h('p', { className: 'ad-help' }, t('resultCharacters', { loaded: state.result.rawText.length, total: state.result.totalCharacters })), state.result.nextOffset !== undefined && h(Button, { disabled: state.busy.result, onClick: () => controller.loadResult(run.childId, true) }, t('loadMore'))))
@@ -912,15 +878,15 @@ window.__ModuleLoader__.load({
         reader.readAsText(file);
       };
       const refresh = () => controller.refresh();
-      const roles = (state.catalog?.agents || []).map(item => roleView(item, state.preview, true));
+      const roles = (state.catalog?.agents || []).map(item => roleView(item, state.evidence[item.id]?.preview, true));
       const lowerSearch = search.toLocaleLowerCase();
       const filtered = roles.filter(item => (filter === 'all' || filter === 'enabled' && item.enabled || filter === 'unavailable' && !item.available) && [item.id, locale.resolveText(item.title), locale.resolveText(item.description), ...item.capabilities, ...item.capabilities.map(id => t('cap.' + id))].join(' ').toLocaleLowerCase().includes(lowerSearch));
       const broken = state.catalog?.overrides.filter(item => !roles.some(agent => agent.id === item.id) && item.id.toLocaleLowerCase().includes(lowerSearch)) || [];
       const sessions = state.catalog?.sessions || [];
       return h('div', { className: 'ad-root' }, h('style', null, css),
-        h('header', { className: 'ad-head' }, h('div', null, h('h2', null, t('title')), h('p', { className: 'ad-muted ad-intro' }, t('intro'))), h(Button, { disabled: state.busy.catalog, onClick: refresh }, t('refresh'))),
+        h('header', { className: 'ad-head' }, h('div', null, h('h2', null, t('title')), h('p', { className: 'ad-muted ad-intro' }, t('intro'))), h(Button, { disabled: state.busy.catalog || state.busy.applySetup, onClick: refresh }, t('refresh'))),
         h('div', { className: 'ad-tabs', role: 'tablist', 'aria-label': t('title') }, ['roles', 'runs', 'diagnostics'].map((tab, index) => h('button', { key: tab, className: 'ad-tab', type: 'button', role: 'tab', id: 'agentdeck-tab-' + tab, 'aria-selected': state.tab === tab, 'aria-controls': 'agentdeck-panel-' + tab, tabIndex: state.tab === tab ? 0 : -1, onClick: () => controller.set({ tab }), onKeyDown: event => { const tabs = ['roles', 'runs', 'diagnostics']; const next = event.key === 'ArrowRight' ? tabs[(index + 1) % 3] : event.key === 'ArrowLeft' ? tabs[(index + 2) % 3] : event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs[2] : null; if (next) { event.preventDefault(); controller.set({ tab: next }); event.currentTarget.parentElement.querySelector('#agentdeck-tab-' + next)?.focus(); } } }, t(tab)))),
-        h('div', { className: 'ad-session' }, h('label', { htmlFor: 'agentdeck-session' }, t('session')), h('div', { className: 'ad-stack' }, h('select', { id: 'agentdeck-session', value: state.sessionId, disabled: state.busy.save || state.busy.reset, onChange: event => { controller.setSession(event.target.value); controller.loadCatalog(); } }, h('option', { value: '' }, t('noSession')), state.sessionId && !sessions.some(item => item.id === state.sessionId) && h('option', { value: state.sessionId }, state.sessionId), sessions.map(item => h('option', { key: item.id, value: item.id }, item.title || item.id))), h('p', { className: 'ad-help' }, t('sessionHint')))),
+        h('div', { className: 'ad-session' }, h('label', { htmlFor: 'agentdeck-session' }, t('session')), h('div', { className: 'ad-stack' }, h('select', { id: 'agentdeck-session', value: state.sessionId, disabled: state.busy.save || state.busy.reset || state.busy.applySetup, onChange: event => { controller.setSession(event.target.value); controller.loadCatalog(); } }, h('option', { value: '' }, t('noSession')), state.sessionId && !sessions.some(item => item.id === state.sessionId) && h('option', { value: state.sessionId }, state.sessionId), sessions.map(item => h('option', { key: item.id, value: item.id }, item.title || item.id))), h('p', { className: 'ad-help' }, t('sessionHint')))),
         h(ErrorNotice, { value: state.errors.catalog, t }), h(ErrorNotice, { value: state.errors.import, t }), h(ErrorNotice, { value: state.errors.export, t }),
         state.notice && h('p', { className: 'ad-notice', role: 'status' }, t(state.notice)),
         dirtyCount > 0 && h('p', { className: 'ad-help', role: 'status' }, t('drafts', { count: dirtyCount })),
@@ -928,8 +894,10 @@ window.__ModuleLoader__.load({
         state.errors.catalog && !state.catalog && h(Button, { onClick: () => controller.loadCatalog() }, t('retry')),
         h('div', { role: 'tabpanel', id: 'agentdeck-panel-' + state.tab, 'aria-labelledby': 'agentdeck-tab-' + state.tab },
           state.tab === 'roles' && state.catalog && h(React.Fragment, null,
-            h('div', { className: 'ad-actions', style: { marginBottom: 16 } }, h(Button, { onClick: () => { if (state.drafts['@new']) controller.set({ creating: true }); else controller.beginCreate(); }, disabled: state.busy.save }, t('newRole')), h(Button, { onClick: () => fileInput.current?.click(), disabled: reading || state.busy.save }, t(reading ? 'fileRead' : 'import')), h('input', { ref: fileInput, type: 'file', accept: '.yaml,.yml,.json,application/yaml,text/yaml,application/json', hidden: true, 'aria-label': t('import'), onChange: onImport })),
-            h(NewRole, { state, controller, t, exportDraft }),
+            h('div', { className: 'ad-actions', style: { marginBottom: 16 } }, h(Button, { onClick: () => { if (state.drafts['@new']) controller.set({ creating: true }); else controller.beginCreate(); }, disabled: state.busy.save || state.busy.applySetup }, t('newRole')), h(Button, { onClick: () => fileInput.current?.click(), disabled: reading || state.busy.save || state.busy.applySetup }, t(reading ? 'fileRead' : 'import')), h('input', { ref: fileInput, type: 'file', accept: '.yaml,.yml,.json,application/yaml,text/yaml,application/json', hidden: true, 'aria-label': t('import'), onChange: onImport })),
+            h(Button, { onClick: () => controller.openSetup(), disabled: state.busy.applySetup || state.busy.save || state.busy.reset }, t('setupTitle')),
+            h(SetupPanel, { state, controller, t, locale }),
+            h(NewRole, { state, controller, t, locale, exportDraft }),
             h('div', { className: 'ad-layout' }, h('aside', { className: 'ad-sidebar', 'aria-label': t('roles') },
               h('label', { className: 'ad-field ad-search' }, h('span', { className: 'ad-sr' }, t('search')), h('input', { type: 'search', value: search, placeholder: t('searchHint'), onChange: event => setSearch(event.target.value) })),
               h('label', { className: 'ad-field' }, h('span', { className: 'ad-sr' }, t('roleFilter')), h('select', { value: filter, onChange: event => setFilter(event.target.value) }, h('option', { value: 'all' }, t('filterAll')), h('option', { value: 'enabled' }, t('filterEnabled')), h('option', { value: 'unavailable' }, t('filterUnavailable')))),

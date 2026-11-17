@@ -53,6 +53,31 @@ export class AgentDeckStore {
       return value;
     });
   }
+  /** Serial with ordinary saves/resets; storage writes remain independent, not atomic. */
+  async saveBatch(rows: { id: string; text: string; expectedRevision?: string }[], validate: (index: number) => Promise<void>) {
+    return this.mutate(async () => {
+      const results: { id: string; status: 'applied' | 'failed' | 'uncertain' | 'not-run'; revision?: string; message?: string }[] = [];
+      let stopped = false;
+      for (const [index, row] of rows.entries()) {
+        if (stopped) { results.push({ id: row.id, status: 'not-run' }); continue; }
+        let writing = false;
+        try {
+          const current = this.getOverride(row.id);
+          if (current?.revision !== row.expectedRevision) throw new Error('Agent configuration changed. Reload it before saving; your draft has not been applied.');
+          await validate(index);
+          const value = { id: row.id, text: row.text, revision: textRevision(row.text), updatedAt: Date.now() };
+          writing = true;
+          await this.table('overrides').put(row.id, value);
+          if (this.getOverride(row.id)?.text !== row.text) throw new Error('Saved configuration could not be confirmed. Refresh before another apply.');
+          results.push({ id: row.id, status: 'applied', revision: value.revision });
+        } catch (error) {
+          results.push({ id: row.id, status: writing ? 'uncertain' : 'failed', message: error instanceof Error ? error.message : String(error) });
+          stopped = true;
+        }
+      }
+      return { status: stopped ? 'stopped' : 'completed', rows: results };
+    });
+  }
   async reset(id: string, expectedRevision: string, validate?: () => Promise<void>): Promise<void> {
     await this.mutate(async () => {
       const current = this.getOverride(id);

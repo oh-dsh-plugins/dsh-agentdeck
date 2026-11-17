@@ -4,6 +4,8 @@ import { join, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadBuiltinAgents, loadBuiltinSkills, resolveCatalog, parseOverrideText, agentRevision, resolveContextBudget } from '../core/index.js';
 import type { AgentDefinition } from '../core/index.js';
+import { rolePresentation } from '../core/presentation.js';
+import { setupRoleIds, setupRoute, recommendRole, setupResources } from './setup.js';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import type { SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent';
@@ -112,7 +114,7 @@ export class AgentDeckController {
     const browserSupport = browserCaps.length ? inspectBrowserSupport(names, role.capabilities, evidence ?? { bsk: { state: 'unverified', reason: 'BrowserSkill requires activation in the independent child before tool permission freeze, plus CLI/extension readiness. Script-only Computer Use is not adapted. No live connection was probed by this list read.' } }) : undefined;
     const unverified = [...missing.filter(value => value === 'web-research'), ...(browserSupport && browserSupport.state !== 'ready' ? browserCaps : [])];
     const required = missing.filter(value => !['web-research', 'browser-observe', 'browser-interact'].includes(value));
-    return { ...role, revision: agentRevision(role), available: role.enabled && required.length === 0 && unverified.length === 0 && !blocked, missingCapabilities: required, unverifiedCapabilities: unverified, capabilityCheck: 'static', ...(browserSupport ? { browserSupport } : {}), builtin: this.builtinIds.has(role.id) };
+    return { ...role, presentation: rolePresentation(role), revision: agentRevision(role), available: role.enabled && required.length === 0 && unverified.length === 0 && !blocked, missingCapabilities: required, unverifiedCapabilities: unverified, capabilityCheck: 'static', ...(browserSupport ? { browserSupport } : {}), builtin: this.builtinIds.has(role.id) };
   }
   private selectionView(view: ReturnType<AgentDeckController['roleView']>, choice: ReturnType<typeof roleChoice>, authorization: JsonObject) {
     return { ...view, capabilitiesAvailable: view.available, available: view.available && authorization.status === 'authorized',
@@ -221,6 +223,81 @@ export class AgentDeckController {
       capacity: { kind: effective ? 'validated-parameters' : metadata && outputTokens !== undefined ? 'configured' : 'unknown', assemblyChecked: false },
       budget: admissionBudget({ ...role.context, windowTokens: metadata?.context?.contextWindow, outputTokens }), diagnostics };
   }
+  async recommend(request: JsonObject, actor?: RuntimeAgent, signal = new AbortController().signal): Promise<JsonObject> {
+    const ids = setupRoleIds(request.roleIds);
+    const defaultRoute = setupRoute(request.defaultRoute);
+    const imageRoute = request.imageRoute === undefined ? defaultRoute : setupRoute(request.imageRoute);
+    if (request.includeBrowser !== undefined && typeof request.includeBrowser !== 'boolean') throw new Error('includeBrowser must be boolean.');
+    const current = await this.resolved(actor);
+    if (current.blockers.length) throw new Error('Resolve unreadable role sources before generating settings.');
+    const routes = [...new Map([defaultRoute, imageRoute].map(route => [JSON.stringify(route), route])).values()];
+    const models = (await Promise.all(routes.map(route => modelDirectory(this.ctx, actor, route, signal, true)))).flatMap(result => result.models);
+    signal.throwIfAborted();
+    const names = this.names();
+    const rows = ids.map(id => {
+      const role = current.agents.find(value => value.id === id);
+      if (!role) throw new Error('Unknown or invalid agent: ' + id);
+      const browser = role.capabilities.some(value => value.startsWith('browser-'));
+      const route = browser ? imageRoute : defaultRoute;
+      const external = current.layers.find(layer => { if (layer.source.startsWith('user:')) return false; try { return parseOverrideText(layer.text).id === id; } catch { return false; } });
+      const view = this.roleView(role, names);
+      return recommendRole(role, this.store.getOverride(id), models.find(model => model.provider === route.provider && model.id === route.model), {
+        externalSource: external?.source, includeBrowser: request.includeBrowser !== false, parent: delegationSelection(actor),
+        capabilitiesMissing: view.missingCapabilities.length > 0 || view.unverifiedCapabilities.length > 0,
+      });
+    });
+    const applicable = rows.filter(row => row.applicable);
+    if (applicable.length) {
+      const preview = await this.previewSetup({ rows: applicable.map(row => ({ id: row.id, text: row.proposedText, roleRevision: row.roleRevision, expectedRevision: row.expectedRevision })) }, actor);
+      for (const row of applicable) row.after = preview.resources[row.id];
+    }
+    const diagnostics = models.filter(model => !model.metadataResolved && model.error).map(model => ({ code: 'setup.metadataFailed',
+      params: { provider: model.provider, model: model.id }, message: `Could not read metadata for ${model.provider}/${model.id}.`, original: model.error }));
+    return { rows, models, diagnostics };
+  }
+  private async prepareSetup(request: JsonObject, actor?: RuntimeAgent) {
+    const ids = setupRoleIds(Array.isArray(request.rows) ? request.rows.map(row => object(row).id) : undefined);
+    const rows = (request.rows as unknown[]).map((value, index) => {
+      const row = object(value); const text = requiredString(row.text, 'text', 1024 * 1024);
+      if (parseOverrideText(text).id !== ids[index]) throw new Error('Submitted id must match the YAML role id.');
+      return { id: ids[index], text, roleRevision: requiredString(row.roleRevision, 'roleRevision', 256), expectedRevision: optionalString(row.expectedRevision, 'expectedRevision') };
+    });
+    const initial = await this.resolved(actor);
+    if (initial.blockers.length) throw new Error('Resolve unreadable role sources before saving.');
+    const original = new Map(initial.agents.map(role => [role.id, role]));
+    for (const row of rows) {
+      if (!original.has(row.id) || agentRevision(original.get(row.id)!) !== row.roleRevision || this.store.getOverride(row.id)?.revision !== row.expectedRevision) throw new Error('Agent configuration changed. Regenerate suggestions before applying.');
+      if (initial.layers.some(layer => { if (layer.source.startsWith('user:')) return false; try { return parseOverrideText(layer.text).id === row.id; } catch { return false; } })) throw new Error('This agent is owned by a source file. Edit that file instead.');
+    }
+    const depth = (id: string, seen = new Set<string>()): number => { if (seen.has(id)) return 0; seen.add(id); const parent = original.get(id)?.extends; return parent ? 1 + depth(parent, seen) : 0; };
+    rows.sort((a, b) => depth(a.id) - depth(b.id) || a.id.localeCompare(b.id));
+    const fingerprint = (catalog: typeof initial) => digest({ roles: catalog.agents.map(role => [role.id, agentRevision(role)]).sort(), layers: catalog.layers.map(layer => [layer.source, layer.text, layer.failure]).sort() });
+    const expected = [fingerprint(initial)];
+    const user = new Map(initial.layers.filter(layer => layer.source.startsWith('user:')).map(layer => [layer.source, layer]));
+    const files = initial.layers.filter(layer => !layer.source.startsWith('user:'));
+    const baselineIssues = new Set(initial.diagnostics.map(issue => JSON.stringify(issue)));
+    let proposed = initial;
+    for (const row of rows) {
+      user.set('user:' + row.id, { source: 'user:' + row.id, text: row.text });
+      const layers = [...[...user.values()].sort((a, b) => a.source.localeCompare(b.source)), ...files];
+      const next = resolveCatalog(layers);
+      const issues = next.diagnostics.filter(issue => !baselineIssues.has(JSON.stringify(issue)));
+      if (issues.length || initial.agents.some(role => !next.agents.some(value => value.id === role.id))) throw new Error(issues.map(issue => issue.message).join('\n') || 'The selection invalidates a derived agent.');
+      proposed = { ...next, layers, blockers: [] };
+      expected.push(fingerprint(proposed));
+    }
+    return { rows, expected, fingerprint, proposed };
+  }
+  async previewSetup(request: JsonObject, actor?: RuntimeAgent): Promise<JsonObject> {
+    const { proposed } = await this.prepareSetup(request, actor);
+    return { resources: Object.fromEntries(proposed.agents.map(role => [role.id, setupResources(role)])) };
+  }
+  async applySetup(request: JsonObject, actor?: RuntimeAgent): Promise<JsonObject> {
+    const { rows, expected, fingerprint } = await this.prepareSetup(request, actor);
+    return this.store.saveBatch(rows, async index => {
+      if (fingerprint(await this.resolved(actor)) !== expected[index]) throw new Error('Agent configuration changed. Refresh and regenerate suggestions before continuing.');
+    });
+  }
   private assertNarrower(before: AgentDefinition | undefined, next: AgentDefinition | undefined): void {
     if (!before || !next || next.capabilities.some(capability => !before.capabilities.includes(capability)) || next.scripts.some(script => !before.scripts.includes(script)) || (next.enabled && !before.enabled)) throw new Error('This change creates, enables or expands capability; use the user management page.');
     const resources = (role: AgentDefinition) => ({ model: role.model, reasoning: role.reasoning, output: role.output, context: role.context });
@@ -275,7 +352,7 @@ export class AgentDeckController {
     const roleId = optionalString(request.role, 'role') ?? 'general';
     const role = await this.role(roleId, parent);
     const prompt = requiredString(request.prompt, 'prompt');
-    const description = optionalString(request.description, 'description') ?? role.title.en;
+    const description = optionalString(request.description, 'description') ?? `${role.title.zh} / ${role.title.en}`;
     const selection = await this.selection(role, parent, request, exec.signal, true);
     const budget = admissionBudget({ ...role.context, windowTokens: selection.metadata.context?.contextWindow, outputTokens: selection.effective.maxTokens ?? selection.metadata.defaultMaxTokens });
     const fixedEstimate = Math.ceil((role.instructions.length + prompt.length) / 3);
@@ -413,6 +490,9 @@ export class AgentDeckController {
       case 'models': return this.models(actor, request, signal);
       case 'preview': return this.preview(requiredString(request.id, 'id'), actor, signal, request);
       case 'candidates': return this.candidates(requiredString(request.id, 'id'), actor, signal);
+      case 'recommend': return this.recommend(request, actor, signal);
+      case 'previewSetup': return this.previewSetup(request, actor);
+      case 'applySetup': return this.applySetup(request, actor);
       case 'save': return this.save(request, actor);
       case 'reset': return this.reset(request, actor);
       case 'runs': return this.runs(actor, signal);

@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 
 let registration;
-vm.runInNewContext(await readFile(new URL('../src/client/index.js', import.meta.url), 'utf8'), {
+vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
   window: { __ModuleLoader__: { load(value) { registration = value; } } },
   AbortController, TextEncoder, setTimeout, clearTimeout,
 });

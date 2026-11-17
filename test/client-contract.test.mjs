@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const source = await readFile(new URL('../src/client/index.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
 let registration;
 vm.runInNewContext(source, {
   window: { __ModuleLoader__: { load(value) { registration = value; } } },
@@ -769,4 +769,188 @@ test('client imports only host React, and every CSS color uses native aliases', 
   assert.equal(/(?:rgba?|hsla?)\(/.test(source), false);
   assert.match(source, /controller\.dispose\(\)/);
   assert.match(source, /fileReader\.current\?\.abort\(\)/);
+});
+
+test('per-role evidence survives switching roles and is cleared by catalog/context changes', async () => {
+ const browser={...general,id:'ui-verifier',revision:'browser-1',authorization:{status:'authorized'},capabilitiesAvailable:false,available:false,unverifiedCapabilities:['browser-observe']};
+ const live={...browser,capabilitiesAvailable:true,available:true,unverifiedCapabilities:[]};
+ const {controller}=harness(call=>ok(call.endpoint==='agentdeck.preview'?{agent:live}:catalog([], [general,browser])));
+ await controller.loadCatalog();await controller.loadPreview('ui-verifier');controller.select('general');
+ let s=controller.getSnapshot();assert.equal(plugin.roleView(browser,s.evidence['ui-verifier'].preview,true).available,true);
+ await controller.loadCatalog();assert.deepEqual(clone(controller.getSnapshot().evidence),{});
+ controller.setSession('session-a');assert.deepEqual(clone(controller.getSnapshot().evidence),{});controller.dispose();
+});
+test('a failed explicit recheck removes the role cache immediately and cannot restore readiness', async () => {
+ const pending=deferred(); let recheck=false;
+ const {controller}=harness(call=>call.endpoint==='agentdeck.catalog'?ok(catalog([], [browserRole])):recheck?pending.promise:ok(clone(readyBrowserPreview)));
+ try {
+  await controller.loadCatalog(); await controller.loadPreview(browserRole.id);
+  assert.equal(plugin.roleView(browserRole,controller.getSnapshot().evidence[browserRole.id].preview,true).available,true);
+  recheck=true; const work=controller.loadPreview(browserRole.id);
+  assert.equal(controller.getSnapshot().evidence[browserRole.id],undefined);
+  pending.resolve({ok:false,error:{code:'PROBE_FAILED',message:'Probe unavailable'}}); await work;
+  assert.equal(plugin.roleStatus(plugin.roleView(browserRole,controller.getSnapshot().evidence[browserRole.id]?.preview,true)),'capabilityUnknown');
+ } finally { controller.dispose(); }
+});
+test('changed setup inputs discard delayed suggestions', async () => {
+ const pending=deferred();const {controller}=harness(call=>call.endpoint==='agentdeck.recommend'?pending.promise:ok(catalog()));
+ await controller.loadCatalog();controller.updateSetup({roleIds:['general'],defaultRoute:{provider:'p',model:'a'}});const work=controller.recommendSetup();
+ controller.updateSetup({defaultRoute:{provider:'p',model:'b'}});pending.resolve(ok({rows:[]}));await work;assert.equal(controller.getSnapshot().setupProposal,null);controller.dispose();
+});
+test('lost setup response reads back exact texts without automatically resubmitting', async () => {
+ const row={id:'general',applicable:true,roleRevision:'factory-r1',proposedText:'proposed'};let writes=0;
+ const {controller,calls}=harness(call=>{if(call.endpoint==='agentdeck.applySetup'){writes++;throw new Error('Lost response');}return ok(catalog(writes?[{id:'general',text:'proposed',revision:'new'}]:[]));});
+ await controller.loadCatalog();controller.set({setupProposal:{rows:[row]},setupSelected:{general:true},setupPreviewReady:true});await controller.applySetup();
+ assert.equal(writes,1);assert.equal(controller.getSnapshot().setupResult.rows[0].status,'observed');assert.equal(controller.getSnapshot().setupProposal,null);
+ await controller.applySetup();assert.equal(calls.filter(call=>call.endpoint==='agentdeck.applySetup').length,1);controller.dispose();
+});
+
+for (const change of ['Session change', 'newer catalog read']) {
+ test('canceled setup readback cannot publish an obsolete result after ' + change, async () => {
+  const pending = deferred(), started = deferred(); let reads = 0, writes = 0;
+  const row = { id: 'general', applicable: true, roleRevision: general.revision, proposedText: 'proposed' };
+  const { controller } = harness(call => {
+   if (call.endpoint === 'agentdeck.applySetup') { writes++; throw new Error('Lost response'); }
+   if (++reads === 2) { started.resolve(); return pending.promise; }
+   return ok(catalog());
+  });
+  try {
+   await controller.loadCatalog();
+   controller.set({ setupProposal: { rows: [row] }, setupSelected: { general: true }, setupPreviewReady: true });
+   const work = controller.applySetup(); await started.promise;
+   if (change === 'Session change') controller.setSession('session-b');
+   await controller.loadCatalog(); await work;
+   assert.equal(controller.getSnapshot().sessionId, change === 'Session change' ? 'session-b' : '');
+   assert.equal(controller.getSnapshot().setupResult, null);
+   assert.equal(writes, 1);
+   pending.resolve(ok(catalog([{ id: 'general', text: 'proposed', revision: 'new' }])));
+   await Promise.resolve();
+   assert.equal(controller.getSnapshot().setupResult, null);
+  } finally { pending.resolve(ok(catalog())); controller.dispose(); }
+ });
+}
+test('an actual setup readback failure still reports uncertain rows without resubmitting', async () => {
+ let writes = 0;
+ const row = { id: 'general', applicable: true, roleRevision: general.revision, proposedText: 'proposed' };
+ const { controller } = harness(call => {
+  if (call.endpoint === 'agentdeck.applySetup') { writes++; throw new Error('Lost response'); }
+  if (writes) throw new Error('Catalog unavailable');
+  return ok(catalog());
+ });
+ try {
+  await controller.loadCatalog();
+  controller.set({ setupProposal: { rows: [row] }, setupSelected: { general: true }, setupPreviewReady: true });
+  await controller.applySetup();
+  assert.equal(controller.getSnapshot().setupResult.rows[0].status, 'unknown');
+  assert.equal(writes, 1);
+ } finally { controller.dispose(); }
+});
+
+test('setup preview uses the exact clean selection and a pending recheck blocks apply', async () => {
+ const pending=deferred();const before={model:{mode:'inherit'},reasoning:{mode:'inherit-compatible'},context:{targetTokens:16000,elasticTokens:48000}};
+ const rows=['general','reader'].map(id=>({id,title:general.title,applicable:true,roleRevision:'factory-r1',proposedText:id,before,after:before,reasons:[],warnings:[]}));
+ let wait=false;const {controller,calls}=harness(call=>call.endpoint==='agentdeck.recommend'?ok({rows}):call.endpoint==='agentdeck.previewSetup'?wait?pending.promise:ok({resources:{reader:before,general:before}}):ok(catalog([], [general,{...general,id:'reader'}])));
+ try {
+  await controller.loadCatalog();controller.edit('general','unsaved');await controller.recommendSetup();
+  assert.deepEqual(calls.find(call=>call.endpoint==='agentdeck.previewSetup').payload.rows.map(row=>row.id),['reader']);
+  assert.equal(controller.getSnapshot().setupPreviewReady,true);wait=true;controller.discard('general');
+  const work=controller.selectSetup('general',true);
+  assert.equal(controller.getSnapshot().setupPreviewReady,false);assert.equal((await controller.applySetup()).ok,false);
+  pending.resolve(ok({resources:{reader:{...before,context:{targetTokens:16000,elasticTokens:27129}},general:before}}));await work;
+  assert.equal(controller.getSnapshot().setupProposal.rows.find(row=>row.id==='reader').after.context.elasticTokens,27129);
+  assert.equal(controller.getSnapshot().setupPreviewReady,true);assert.equal(calls.some(call=>call.endpoint==='agentdeck.applySetup'),false);
+ }finally{controller.dispose();}
+});
+test('obsolete setup subset previews cannot replace a newer checkbox selection', async () => {
+ const old=deferred();const latest=deferred();let reads=0;const before={model:{mode:'inherit'},reasoning:{mode:'inherit-compatible'},context:{targetTokens:16000,elasticTokens:48000}};
+ const rows=['general','reader'].map(id=>({id,title:general.title,applicable:true,roleRevision:'factory-r1',proposedText:id,before,after:before,reasons:[],warnings:[]}));
+ const {controller}=harness(call=>call.endpoint==='agentdeck.recommend'?ok({rows}):call.endpoint==='agentdeck.previewSetup'?++reads===1?ok({resources:{reader:before,general:before}}):reads===2?old.promise:latest.promise:ok(catalog()));
+ try {
+  await controller.loadCatalog();await controller.recommendSetup();const first=controller.selectSetup('general',false);const second=controller.selectSetup('general',true);
+  latest.resolve(ok({resources:{reader:{...before,context:{targetTokens:16000,elasticTokens:27129}},general:before}}));await second;
+  old.resolve(ok({resources:{reader:before,general:before}}));await first;
+  assert.equal(controller.getSnapshot().setupSelected.general,true);assert.equal(controller.getSnapshot().setupProposal.rows[1].after.context.elasticTokens,27129);
+ }finally{controller.dispose();}
+});
+
+for (const change of ['Session change', 'catalog refresh']) {
+ test('setup scope drops removed roles on ' + change + ' while retaining valid choices and drafts', async () => {
+  const project = { ...general, id: 'project-agent', builtin: false };
+  const reader = { ...general, id: 'reader' };
+  let agents = [general, project, reader];
+  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.recommend' ? ok({ rows: [] }) : ok(catalog([], agents)));
+  try {
+   await controller.loadCatalog();
+   controller.updateSetup({ roleIds: ['project-agent', 'general'] });
+   controller.edit('project-agent', 'unsaved project draft');
+   if (change === 'Session change') controller.setSession('session-b');
+   agents = [general, reader];
+   await controller.loadCatalog();
+   await controller.recommendSetup();
+   assert.deepEqual(calls.find(call => call.endpoint === 'agentdeck.recommend').payload.roleIds, ['general']);
+   assert.deepEqual(clone(controller.getSnapshot().setupOptions.roleIds), ['general']);
+   assert.equal(controller.getSnapshot().drafts['project-agent'].text, 'unsaved project draft');
+  } finally { controller.dispose(); }
+ });
+}
+for (const code of ['setup.sourceOwned', 'setup.browserExcluded']) {
+ test('read-only inherited setup results stay current for ' + code + ' without making the row selectable', async () => {
+  const before = { model: { mode: 'inherit' }, reasoning: { mode: 'inherit-compatible' }, context: { targetTokens: 16000, elasticTokens: 48000 } };
+  const after = { ...before, model: { mode: 'fixed', provider: 'p', model: 'small' }, context: { targetTokens: 16000, elasticTokens: 27129 } };
+  const rows = [
+   { id: 'general', title: general.title, applicable: true, roleRevision: general.revision, proposedText: 'general patch', before, reasons: [], warnings: [] },
+   { id: 'derived-reader', title: general.title, applicable: false, roleRevision: 'derived-r1', before, reasons: [], warnings: [{ code }] },
+  ];
+  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.recommend' ? ok({ rows }) : call.endpoint === 'agentdeck.previewSetup' ? ok({ resources: { general: after, 'derived-reader': after } }) : ok(catalog()));
+  try {
+   await controller.loadCatalog(); await controller.recommendSetup();
+   const derived = () => controller.getSnapshot().setupProposal.rows.find(row => row.id === 'derived-reader');
+   assert.ok(derived().after, 'Inherited display resources must be present');
+   assert.deepEqual(clone(derived().after), after);
+   assert.equal(derived().applicable, false);
+   assert.equal(controller.getSnapshot().setupSelected['derived-reader'], false);
+   assert.deepEqual(calls.find(call => call.endpoint === 'agentdeck.previewSetup').payload.rows.map(row => row.id), ['general']);
+   assert.equal((await controller.selectSetup('derived-reader', true)).ok, false);
+   await controller.selectSetup('general', false);
+   assert.deepEqual(clone(derived().after), before);
+   assert.equal(controller.getSnapshot().setupPreviewReady, true);
+   await controller.selectSetup('general', true);
+   assert.deepEqual(clone(derived().after), after);
+   assert.equal(controller.getSnapshot().setupSelected['derived-reader'], false);
+  } finally { controller.dispose(); }
+ });
+}
+test('omitted inherited setup results prevent applying an incomplete impact preview', async () => {
+ const before = { model: { mode: 'inherit' }, reasoning: { mode: 'inherit-compatible' }, context: general.context };
+ const rows = [
+  { id: 'general', title: general.title, applicable: true, roleRevision: general.revision, proposedText: 'general patch', before, reasons: [], warnings: [] },
+  { id: 'derived-reader', title: general.title, applicable: false, roleRevision: 'derived-r1', before, reasons: [], warnings: [] },
+ ];
+ const { controller, calls } = harness(call => call.endpoint === 'agentdeck.recommend' ? ok({ rows }) : call.endpoint === 'agentdeck.previewSetup' ? ok({ resources: { general: before } }) : ok(catalog()));
+ try {
+  await controller.loadCatalog(); await controller.recommendSetup();
+  assert.equal(controller.getSnapshot().setupPreviewReady, false);
+  assert.equal(controller.getSnapshot().errors.setupPreview.code, 'malformedResponse');
+  assert.equal((await controller.applySetup()).ok, false);
+  assert.equal(calls.some(call => call.endpoint === 'agentdeck.applySetup'), false);
+ } finally { controller.dispose(); }
+});
+
+test('catalog reload clears both list evidence and the unchanged detail preview', async () => {
+ const {controller}=harness(call=>ok(call.endpoint==='agentdeck.preview'?clone(readyBrowserPreview):catalog([], [browserRole])));
+ try {
+  await controller.loadCatalog();controller.select(browserRole.id);await controller.loadPreview(browserRole.id);
+  assert.equal(controller.getSnapshot().preview.agent.available,true);
+  await controller.loadCatalog();const state=controller.getSnapshot();
+  assert.equal(state.preview,null);assert.deepEqual(clone(state.evidence),{});
+  assert.equal(plugin.roleStatus(plugin.roleView(browserRole,state.preview)),plugin.roleStatus(plugin.roleView(browserRole,state.evidence[browserRole.id]?.preview,true)));
+ } finally {controller.dispose();}
+});
+test('catalog reload rejects a delayed preview even when the role revision is unchanged', async () => {
+ const pending=deferred();const {controller}=harness(call=>call.endpoint==='agentdeck.preview'?pending.promise:ok(catalog([], [browserRole])));
+ try {
+  await controller.loadCatalog();const work=controller.loadPreview(browserRole.id);await controller.loadCatalog();
+  pending.resolve(ok(clone(readyBrowserPreview)));await work;
+  assert.equal(controller.getSnapshot().preview,null);assert.deepEqual(clone(controller.getSnapshot().evidence),{});
+ } finally {controller.dispose();}
 });

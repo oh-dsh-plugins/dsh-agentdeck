@@ -3,6 +3,59 @@
     "title": "DSH AgentDeck",
     "description": "Ready-to-use native agents with role customization, actual model settings and task results."
   },
+  "presentation": {
+    "roles": {},
+    "skills": {
+      "task-handoff": {
+        "title": "Task handoff"
+      },
+      "repository-map": {
+        "title": "Repository mapping"
+      },
+      "bounded-research": {
+        "title": "Bounded research"
+      },
+      "evidence-reading": {
+        "title": "Evidence reading"
+      },
+      "architecture-decisions": {
+        "title": "Architecture decisions"
+      },
+      "scoped-implementation": {
+        "title": "Scoped implementation"
+      },
+      "project-checks": {
+        "title": "Project checks"
+      },
+      "test-design": {
+        "title": "Test design"
+      },
+      "fault-isolation": {
+        "title": "Fault isolation"
+      },
+      "change-review": {
+        "title": "Change review"
+      },
+      "browser-verification": {
+        "title": "Browser verification"
+      },
+      "data-analysis": {
+        "title": "Data analysis"
+      },
+      "documentation": {
+        "title": "Documentation"
+      },
+      "security-review": {
+        "title": "Security review"
+      },
+      "performance-investigation": {
+        "title": "Performance investigation"
+      },
+      "long-document-reading": {
+        "title": "Long document reading"
+      }
+    }
+  },
   "ui": {
     "title": "AgentDeck",
     "intro": "Ready-to-use agents, with your own settings.",
@@ -220,6 +273,74 @@
     "cap.browser-observe": "Observe browser",
     "cap.browser-interact": "Interact with browser",
     "cap.data-query": "Query data",
-    "cap.artifact-write": "Write artifacts"
+    "cap.artifact-write": "Write artifacts",
+    "setupTitle": "Quick setup",
+    "setupHint": "Choose your configured models and agents, review the suggested changes, then apply the selected rows.",
+    "setupDefaultModel": "Default model",
+    "setupImageModel": "Image model for browser agents (optional)",
+    "setupUseDefault": "Use the default model",
+    "setupBrowser": "Include browser agents (BrowserSkill / browser MCP)",
+    "setupScope": "Agents to configure: {count}",
+    "setupToggleAll": "Select all / clear",
+    "setupLimit": "This configures AgentDeck agents. Plugin installation, plugin settings and native model permissions are managed in DSH.",
+    "setupGenerate": "Generate suggestions",
+    "setupReview": "Review suggested changes",
+    "setupInheritance": "Derived agents keep their inheritance. Updating a base can also affect descendants that inherit its settings.",
+    "setupBefore": "Current model",
+    "setupAfter": "Model after applying selected rows",
+    "setupPreviewPending": "Checking the selected combination…",
+    "setupNotApplicable": "No applicable suggestion",
+    "setupYaml": "Suggested YAML",
+    "setupEdit": "Edit as a draft",
+    "setupApplyHint": "Applies to new tasks. Each row is checked before saving; the batch stops at the first failure and keeps successful rows.",
+    "setupApply": "Apply {count} selected agents",
+    "setupComplete": "Selected settings applied",
+    "setupStopped": "Application stopped; review each result",
+    "setupReconciled": "Readback after an unconfirmed response; nothing was replayed",
+    "close": "Close",
+    "diagnosticNotice": "See diagnostic details.",
+    "originalDiagnostic": "Original diagnostic",
+    "browserReadyHint": "Browser support was verified. Refresh to check again.",
+    "browserUnverifiedHint": "Browser support has not been verified in this view.",
+    "browserUnsupportedHint": "Browser support is unavailable in this environment.",
+    "modality.text": "Text",
+    "modality.image": "Image",
+    "modality.audio": "Audio",
+    "modality.video": "Video",
+    "setup.status.applied": "Applied",
+    "setup.status.failed": "Failed",
+    "setup.status.uncertain": "Write outcome unconfirmed",
+    "setup.status.not-run": "Not run",
+    "setup.status.observed": "Suggested text observed; write attribution unconfirmed",
+    "setup.status.unknown": "Outcome unknown; refresh before retrying",
+    "setup.defaultRoute": "Use the selected default model.",
+    "setup.imageRoute": "Use the selected image model for browser verification.",
+    "setup.sourceOwned": "Edit this agent in its source: {source}",
+    "setup.browserExcluded": "Browser agents were excluded.",
+    "setup.metadataMissing": "Resolve the selected model metadata before applying.",
+    "setup.metadataFailed": "Could not read metadata for {provider}/{model}. Expand the original diagnostic for the cause, then retry generating suggestions.",
+    "setup.outputAssumed": "Input estimates use the model default output. A Session may inherit a different output limit.",
+    "setup.sessionNoCapacity": "The current Session output limit leaves no input capacity. Existing input targets are preserved; saving does not change that Session.",
+    "setup.imageRequired": "Browser verification requires a model with declared image input.",
+    "setup.authorizationWarning": "The current Session does not authorize this model. Saving does not grant authorization.",
+    "setup.capabilityWarning": "Some runtime capabilities are missing or unverified. Saving does not enable plugins.",
+    "setup.noCapacity": "The output reservation exhausts this model context window.",
+    "setup.contextClamped": "Adjust input targets to the safe capacity declared by this model: {tokens} tokens.",
+    "setup.capacityUnknown": "Context or output capacity is unknown. Existing targets are preserved.",
+    "status.running": "Running",
+    "status.inactive": "Idle",
+    "status.completed": "Completed",
+    "status.cancelled": "Cancelled",
+    "status.canceled": "Cancelled",
+    "status.failed": "Failed",
+    "status.error": "Error",
+    "status.not-resident": "Not resident",
+    "status.finished-unverified": "Finished, outcome unverified",
+    "status.verified": "Verified",
+    "status.unknown": "Unknown",
+    "status.pending": "Pending",
+    "status.interrupted": "Interrupted",
+    "status.stopped": "Stopped",
+    "status.blocked": "Blocked"
   }
 }

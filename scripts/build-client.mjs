@@ -1,6 +1,10 @@
-import { copyFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 const source = new URL('../src/client/index.js', import.meta.url);
 const output = new URL('../lib/client.js', import.meta.url);
 await mkdir(new URL('../lib/', import.meta.url), { recursive: true });
-await copyFile(source, output);
+const dictionaries = Object.fromEntries(await Promise.all(['en', 'zh'].map(async language => [language, JSON.parse(await readFile(new URL('../locale/' + language + '.json', import.meta.url), 'utf8')).ui])));
+const code = await readFile(source, 'utf8');
+const marker = '/* AGENTDECK_LOCALES */ null';
+if (code.split(marker).length !== 2) throw new Error('Client locale marker must occur exactly once.');
+await writeFile(output, code.replace(marker, JSON.stringify(dictionaries)), 'utf8');
 console.log('Built native Client module: lib/client.js');

@@ -5,7 +5,7 @@ import test from 'node:test';
 import { agentRevision, loadBuiltinAgents, resolveCatalog } from '../lib/core/index.js';
 
 let registration;
-vm.runInNewContext(await readFile(new URL('../src/client/index.js', import.meta.url), 'utf8'), {
+vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
   window: { __ModuleLoader__: { load(value) { registration = value; } } },
   AbortController, TextEncoder, setTimeout, clearTimeout,
 });

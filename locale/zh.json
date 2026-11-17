@@ -3,6 +3,236 @@
     "title": "代理工具箱",
     "description": "开箱即用的原生代理，支持角色定制、实际模型设置与任务结果查看。"
   },
+  "presentation": {
+    "roles": {
+      "general": {
+        "inputs": [
+          "任务目标与已授权操作",
+          "相关材料位置与约束"
+        ],
+        "deliverables": [
+          "有证据支持的答复或限定范围的交接",
+          "已完成工作、验证结果与明确限制"
+        ]
+      },
+      "code-scout": {
+        "inputs": [
+          "要定位的符号、行为或功能",
+          "仓库根目录与相关路径"
+        ],
+        "deliverables": [
+          "附文件位置的入口和调用链地图",
+          "现有扩展模式与未解决问题"
+        ]
+      },
+      "researcher": {
+        "inputs": [
+          "研究问题及其支持的决策",
+          "日期范围、来源约束与所需深度"
+        ],
+        "deliverables": [
+          "附证据链接的直接答复",
+          "冲突发现、可信度与剩余缺口"
+        ]
+      },
+      "reader": {
+        "inputs": [
+          "文档或源码路径",
+          "待回答问题与所需引用精度"
+        ],
+        "deliverables": [
+          "可追溯到原文位置的结构化归纳",
+          "阅读覆盖范围与矛盾点"
+        ]
+      },
+      "architect": {
+        "inputs": [
+          "问题、约束与验收标准",
+          "现有契约、集成与运行限制"
+        ],
+        "deliverables": [
+          "推荐设计、备选方案与理由",
+          "接口、失败处理与实施顺序"
+        ]
+      },
+      "implementer": {
+        "inputs": [
+          "已授权的行为变更与负责路径",
+          "验收标准与相关契约"
+        ],
+        "deliverables": [
+          "负责范围内的完整补丁",
+          "相关验证结果与剩余限制"
+        ]
+      },
+      "test-runner": {
+        "inputs": [
+          "检查命令或变更行为",
+          "项目根目录、环境与时间限制"
+        ],
+        "deliverables": [
+          "已执行检查、退出状态与精简证据",
+          "失败分类与准确的解除阻塞条件"
+        ]
+      },
+      "test-designer": {
+        "inputs": [
+          "行为契约与验收标准",
+          "现有测试、夹具与获准修改的测试路径"
+        ],
+        "deliverables": [
+          "围绕行为的用例及获准实现的测试",
+          "覆盖理由与实际执行结果"
+        ]
+      },
+      "debugger": {
+        "inputs": [
+          "复现步骤、实际失败与预期行为",
+          "相关日志、环境与允许修改范围"
+        ],
+        "deliverables": [
+          "有证据支持的根因与最小修复",
+          "修复前后复现对比与回归证据"
+        ]
+      },
+      "reviewer": {
+        "inputs": [
+          "待审查的变更、差异或文件集",
+          "行为契约与相关调用方"
+        ],
+        "deliverables": [
+          "附准确文件位置的分级缺陷",
+          "审查覆盖范围与重要的未验证行为"
+        ]
+      },
+      "ui-verifier": {
+        "inputs": [
+          "现有应用地址与用户操作流程",
+          "预期可见行为与允许的交互"
+        ],
+        "deliverables": [
+          "实际操作结果与可复现的界面缺陷",
+          "有帮助时提供截图或无障碍证据"
+        ]
+      },
+      "data-analyst": {
+        "inputs": [
+          "数据集或读取权限与分析问题",
+          "指标定义、单位、粒度与隐私约束"
+        ],
+        "deliverables": [
+          "附假设和统计分母的可复现结果",
+          "数据质量发现与有用的表格或产物"
+        ]
+      },
+      "docs-writer": {
+        "inputs": [
+          "读者、用户任务与获准修改的文档路径",
+          "当前实现与权威依据"
+        ],
+        "deliverables": [
+          "包含可用示例的完整文档",
+          "明确的前提条件与验证限制"
+        ]
+      },
+      "security-reviewer": {
+        "inputs": [
+          "审查目标与威胁假设",
+          "身份验证、授权与数据流契约"
+        ],
+        "deliverables": [
+          "可达安全问题、影响与修复建议",
+          "信任边界覆盖范围与证据限制"
+        ]
+      },
+      "performance-debugger": {
+        "inputs": [
+          "慢负载与可复现环境",
+          "延迟、吞吐或资源目标及修改范围"
+        ],
+        "deliverables": [
+          "测得的瓶颈与有证据支持的原因",
+          "成对的修改前后结果与正确性检查"
+        ]
+      },
+      "long-document-reader": {
+        "inputs": [
+          "大型文档集合与待回答问题",
+          "覆盖要求与上下文约束"
+        ],
+        "deliverables": [
+          "有引用的归纳与可导航的证据索引",
+          "阅读覆盖范围、未解决矛盾与恢复笔记"
+        ]
+      }
+    },
+    "skills": {
+      "task-handoff": {
+        "title": "任务交接",
+        "description": "保留授权、限定工作范围、记录证据，并提供可执行的交接。"
+      },
+      "repository-map": {
+        "title": "仓库地图",
+        "description": "定位入口、责任归属与调用路径，控制上下文用量。"
+      },
+      "bounded-research": {
+        "title": "限定范围研究",
+        "description": "使用一手来源、注明日期的证据与明确的不确定性回答研究问题。"
+      },
+      "evidence-reading": {
+        "title": "证据阅读",
+        "description": "忠实阅读材料，将结论连接到可检索的位置。"
+      },
+      "architecture-decisions": {
+        "title": "架构决策",
+        "description": "依据真实契约比较可行设计，记录决策与取舍。"
+      },
+      "scoped-implementation": {
+        "title": "限定范围实现",
+        "description": "以最小且完整的修改实现已授权变更，并执行相关检查。"
+      },
+      "project-checks": {
+        "title": "项目检查",
+        "description": "发现并执行项目已有检查，不安装依赖、不编造结果。"
+      },
+      "test-design": {
+        "title": "测试设计",
+        "description": "依据行为、失败边界和可观察的验收标准设计测试。"
+      },
+      "fault-isolation": {
+        "title": "故障隔离",
+        "description": "复现故障，通过实验区分原因，验证必要修复。"
+      },
+      "change-review": {
+        "title": "变更审查",
+        "description": "审查变更行为，仅报告有证据且可行动的缺陷。"
+      },
+      "browser-verification": {
+        "title": "浏览器验证",
+        "description": "操作真实界面、验证可见行为，并恢复测试创建的状态。"
+      },
+      "data-analysis": {
+        "title": "数据分析",
+        "description": "验证数据粒度、计算可复现结果，并解释不确定性。"
+      },
+      "documentation": {
+        "title": "文档撰写",
+        "description": "编写符合当前产品与已验证命令、面向任务的文档。"
+      },
+      "security-review": {
+        "title": "安全审查",
+        "description": "追踪具体信任边界，报告可达的安全缺陷。"
+      },
+      "performance-investigation": {
+        "title": "性能调查",
+        "description": "测量可复现的慢路径，使用成对基线验证改善。"
+      },
+      "long-document-reading": {
+        "title": "长文档阅读",
+        "description": "维护证据索引，分段阅读长文档并控制上下文恢复。"
+      }
+    }
+  },
   "ui": {
     "title": "代理工具箱",
     "intro": "开箱即用的代理，也可按需定制。",
@@ -220,6 +450,74 @@
     "cap.browser-observe": "观察浏览器",
     "cap.browser-interact": "操作浏览器",
     "cap.data-query": "查询数据",
-    "cap.artifact-write": "写入产物"
+    "cap.artifact-write": "写入产物",
+    "setupTitle": "一键配置",
+    "setupHint": "选择已配置的模型与代理，查看配置建议，再应用勾选项。",
+    "setupDefaultModel": "默认模型",
+    "setupImageModel": "浏览器代理的图像模型（可选）",
+    "setupUseDefault": "使用默认模型",
+    "setupBrowser": "包含浏览器代理（BrowserSkill / 浏览器 MCP）",
+    "setupScope": "待配置代理：{count} 个",
+    "setupToggleAll": "全选 / 清空",
+    "setupLimit": "此处配置 AgentDeck 代理。插件安装、插件自身设置和原生模型权限由 DSH 管理。",
+    "setupGenerate": "生成配置建议",
+    "setupReview": "检查配置建议",
+    "setupInheritance": "派生代理保留继承关系；修改基础代理也可能影响继承其设置的后代。",
+    "setupBefore": "当前模型",
+    "setupAfter": "按勾选应用后的模型",
+    "setupPreviewPending": "正在检查当前勾选组合…",
+    "setupNotApplicable": "无可应用建议",
+    "setupYaml": "建议 YAML",
+    "setupEdit": "作为草稿编辑",
+    "setupApplyHint": "对新任务生效。逐项检查并保存，遇错即停，已成功项保留。",
+    "setupApply": "应用选中的 {count} 个代理",
+    "setupComplete": "已应用选中配置",
+    "setupStopped": "应用已停止，请检查逐项结果",
+    "setupReconciled": "响应未确认，已读取当前配置核对；未重复写入",
+    "close": "关闭",
+    "diagnosticNotice": "请展开查看诊断详情。",
+    "originalDiagnostic": "诊断原文",
+    "browserReadyHint": "已验证浏览器支持，可刷新重新检查。",
+    "browserUnverifiedHint": "当前视图尚未验证浏览器支持。",
+    "browserUnsupportedHint": "当前环境无法使用浏览器支持。",
+    "modality.text": "文本",
+    "modality.image": "图像",
+    "modality.audio": "音频",
+    "modality.video": "视频",
+    "setup.status.applied": "已应用",
+    "setup.status.failed": "失败",
+    "setup.status.uncertain": "写入结果待确认",
+    "setup.status.not-run": "未执行",
+    "setup.status.observed": "当前内容与建议一致，无法确认写入归属",
+    "setup.status.unknown": "结果未知，请刷新后再决定是否重试",
+    "setup.defaultRoute": "使用所选默认模型。",
+    "setup.imageRoute": "使用所选图像模型进行浏览器验证。",
+    "setup.sourceOwned": "请编辑此代理的配置来源：{source}",
+    "setup.browserExcluded": "未选择浏览器代理。",
+    "setup.metadataMissing": "应用前须成功读取所选模型的元数据。",
+    "setup.metadataFailed": "无法读取 {provider}/{model} 的元数据。请展开诊断原文查看原因，处理后重新生成建议。",
+    "setup.outputAssumed": "输入容量按模型默认输出估算；会话可能继承不同的输出上限。",
+    "setup.sessionNoCapacity": "当前会话的输出上限未留出输入容量。已保留现有输入目标；保存配置不会改变该会话。",
+    "setup.imageRequired": "浏览器验证需要明确声明支持图像输入的模型。",
+    "setup.authorizationWarning": "当前会话未授权此模型；保存配置不会授予权限。",
+    "setup.capabilityWarning": "部分运行能力缺失或未验证；保存配置不会启用插件。",
+    "setup.noCapacity": "输出预留已耗尽此模型的上下文窗口。",
+    "setup.contextClamped": "按模型声明的安全容量调整输入目标：{tokens} 词元。",
+    "setup.capacityUnknown": "上下文或输出容量未知，保留现有输入目标。",
+    "status.running": "运行中",
+    "status.inactive": "空闲",
+    "status.completed": "已完成",
+    "status.cancelled": "已取消",
+    "status.canceled": "已取消",
+    "status.failed": "失败",
+    "status.error": "错误",
+    "status.not-resident": "未驻留",
+    "status.finished-unverified": "已结束，结果待验证",
+    "status.verified": "已验证",
+    "status.unknown": "未知",
+    "status.pending": "等待中",
+    "status.interrupted": "已中断",
+    "status.stopped": "已停止",
+    "status.blocked": "受阻"
   }
 }
