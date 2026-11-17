@@ -74,7 +74,9 @@ window.__ModuleLoader__.load({
       let disposed = false;
       let state = {
         catalog: null, selectedId: '', sessionId: '', tab: 'roles', drafts: {},
-        evidence: {}, setupOpen: false, setupOptions: { defaultRoute: { provider: '', model: '' }, imageRoute: { provider: '', model: '' }, includeBrowser: true, roleIds: [] }, setupProposal: null, setupSelected: {}, setupPreviewReady: false, setupResult: null,
+        evidence: {}, setupOpen: false, setupSeeded: false,
+        setupOptions: { mode: 'inherit', inheritOutputPolicy: { mode: 'preserve' }, fixed: { mode: 'fixed', provider: '', model: '', reasoning: { mode: 'model-default' }, outputPolicy: { mode: 'preserve' } }, auto: { mode: 'auto', candidates: [], defaultCandidate: '' }, scopePolicy: 'fill-unconfigured', defaultRoute: { provider: '', model: '' }, imageRoute: { provider: '', model: '' }, includeBrowser: true, browserSeparate: false, resourceMigration: {}, roleIds: [] },
+        setupProposal: null, setupSelected: {}, setupPreviewReady: false, setupImpacts: [], setupImpactRevision: null, setupAccepted: {}, setupResult: null,
         models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, previewCandidates: {}, runs: null, result: null, resultChild: '',
         creating: false, newId: '', newBase: 'general', imported: false,
         errors: {}, busy: {}, notice: ''
@@ -174,6 +176,7 @@ window.__ModuleLoader__.load({
       }
       function select(id) { ensureDraft(id); publish({ selectedId: id, creating: false, preview: null, notice: '' }); }
       function edit(id, text) {
+        invalidateSetup();
         ensureDraft(id);
         publish({ drafts: { ...state.drafts, [id]: { ...state.drafts[id], text, kind: 'raw' } }, notice: '' });
       }
@@ -181,6 +184,7 @@ window.__ModuleLoader__.load({
         ensureDraft(id);
         const draft = state.drafts[id];
         if (!draft.form || (isDirty(draft) && draft.kind === 'raw')) return;
+        invalidateSetup();
         const form = { ...draft.form, ...patch };
         if (patch.model?.mode === 'auto' || Object.hasOwn(patch, 'output')) form.schemaVersion = 2;
         if (form.model?.mode === 'auto') { form.reasoning = { mode: 'model-default' }; delete form.output; }
@@ -440,26 +444,72 @@ window.__ModuleLoader__.load({
       }
       function invalidateSetup() {
         for (const key of ['recommend', 'setupPreview']) { requests.get(key)?.abort(); requests.delete(key); }
-        publish({ setupProposal: null, setupSelected: {}, setupPreviewReady: false, errors: { ...state.errors, setupPreview: null }, busy: { ...state.busy, recommend: false, setupPreview: false } });
+        publish({ setupProposal: null, setupSelected: {}, setupPreviewReady: false, setupImpacts: [], setupImpactRevision: null, setupAccepted: {}, errors: { ...state.errors, setupPreview: null }, busy: { ...state.busy, recommend: false, setupPreview: false } });
+      }
+      function setupProtection(agent, options = state.setupOptions) {
+        if (isDirty(state.drafts[agent.id])) return 'draftConflict';
+        if (agent.source && !agent.source.startsWith('user:')) return 'setupSourceProtected';
+        if (options.scopePolicy !== 'replace-selected' && (findOverride(agent.id) || !agent.enabled)) return 'setupProtected';
+        return '';
       }
       function updateSetup(patch) {
         if (state.busy.applySetup) return;
         invalidateSetup();
-        publish({ setupOptions: { ...state.setupOptions, ...patch }, setupResult: null });
+        const options = { ...state.setupOptions, ...patch };
+        if (patch.defaultRoute) { options.mode = 'fixed'; options.fixed = { ...options.fixed, ...patch.defaultRoute }; }
+        // Unlocking replacement never adds roles to the owner's selection.
+        if (patch.scopePolicy === 'fill-unconfigured') options.roleIds = options.roleIds.filter(id => { const agent = findAgent(id); return agent && !setupProtection(agent, options); });
+        publish({ setupOptions: options, setupResult: null });
       }
       function openSetup() {
-        if (!state.setupOptions.roleIds.length) updateSetup({ roleIds: state.catalog?.agents.map(agent => agent.id) || [] });
+        if (!state.setupSeeded && state.catalog) {
+          updateSetup({ roleIds: state.catalog.agents.filter(agent => !setupProtection(agent)).map(agent => agent.id) });
+          publish({ setupSeeded: true });
+        }
         publish({ setupOpen: true }); void loadProviders();
+      }
+      function addSetupCandidate() {
+        const pool = state.setupOptions.auto;
+        if (pool.candidates.length >= 3) return;
+        let number = 1;
+        while (pool.candidates.some(item => item.id === 'candidate-' + number)) number++;
+        updateSetup({ auto: { ...pool, candidates: [...pool.candidates, { id: 'candidate-' + number, purpose: '', provider: '', model: '', reasoning: { mode: 'model-default' }, maxTokens: '' }] } });
+      }
+      function updateSetupCandidate(id, patch) {
+        const pool = state.setupOptions.auto;
+        updateSetup({ auto: { ...pool, candidates: pool.candidates.map(item => item.id === id ? { ...item, ...patch } : item) } });
+      }
+      function removeSetupCandidate(id) {
+        const pool = state.setupOptions.auto;
+        if (pool.candidates.length <= 1) return;
+        updateSetup({ auto: { ...pool, candidates: pool.candidates.filter(item => item.id !== id), defaultCandidate: pool.defaultCandidate === id ? '' : pool.defaultCandidate } });
+      }
+      async function setSetupCandidateModel(id, model) {
+        const item = state.setupOptions.auto.candidates.find(candidate => candidate.id === id);
+        if (!item) return { ok: false };
+        updateSetupCandidate(id, { model, reasoning: { mode: 'model-default' } });
+        const options = state.setupOptions, session = state.sessionId;
+        const answer = await loadModelMetadata(item.provider, model);
+        const metadata = modelMetadataState(item.provider, model).model;
+        if (!validTokens(item.maxTokens) && answer.ok && options === state.setupOptions && session === state.sessionId && metadata?.metadataResolved && validTokens(metadata.defaultMaxTokens)) updateSetupCandidate(id, { maxTokens: metadata.defaultMaxTokens });
+        return answer;
+      }
+      const setupApplicable = row => row.applicable && (row.status === undefined || row.status === 'changed');
+      function acceptSetupImpact(id, checked) {
+        if (!state.busy.applySetup && state.setupPreviewReady && state.setupImpacts.some(item => item.id === id)) publish({ setupAccepted: { ...state.setupAccepted, [id]: checked } });
       }
       async function recommendSetup() {
         if (state.busy.applySetup) return { ok: false };
         const options = state.setupOptions;
         const catalog = state.catalog;
         invalidateSetup(); publish({ setupResult: null });
-        const { imageRoute, ...payload } = options;
-        const answer = await request('recommend', 'recommend', { ...payload, ...(imageRoute.provider && imageRoute.model ? { imageRoute } : {}), ...sessionPayload() }, value => {
+        const strategy = options.mode === 'auto' ? options.auto : options.mode === 'fixed' ? options.fixed : { mode: 'inherit', ...(options.inheritOutputPolicy.mode === 'preserve' ? {} : { outputPolicy: options.inheritOutputPolicy }) };
+        const browserActive = options.includeBrowser && catalog?.agents.some(agent => options.roleIds.includes(agent.id) && agent.capabilities?.some(value => value.startsWith('browser-')));
+        const payload = { roleIds: options.roleIds, strategy, scopePolicy: options.scopePolicy, includeBrowser: options.includeBrowser,
+          ...(browserActive && options.browserSeparate ? { browserStrategy: { mode: 'fixed', ...options.imageRoute } } : {}), resourceMigration: Object.fromEntries(Object.entries(options.resourceMigration).filter(([id]) => options.roleIds.includes(id))) };
+        const answer = await request('recommend', 'recommend', { ...payload, ...sessionPayload() }, value => {
           if (options !== state.setupOptions || catalog !== state.catalog) return;
-          publish({ setupProposal: value, setupSelected: Object.fromEntries(value.rows.map(row => [row.id, row.applicable && !isDirty(state.drafts[row.id])])) });
+          publish({ setupProposal: value, setupSelected: Object.fromEntries(value.rows.map(row => [row.id, setupApplicable(row) && !isDirty(state.drafts[row.id])])) });
         });
         if (answer.ok && state.setupProposal === answer.value) await previewSetup();
         return answer;
@@ -468,16 +518,16 @@ window.__ModuleLoader__.load({
         const proposal = state.setupProposal, selection = state.setupSelected, catalog = state.catalog;
         if (!proposal || state.busy.applySetup) return { ok: false };
         requests.get('setupPreview')?.abort(); requests.delete('setupPreview');
-        publish({ setupPreviewReady: false, errors: { ...state.errors, setupPreview: null }, busy: { ...state.busy, setupPreview: false } });
-        const rows = proposal.rows.filter(row => selection[row.id] && row.applicable);
+        publish({ setupPreviewReady: false, setupImpacts: [], setupImpactRevision: null, setupAccepted: {}, errors: { ...state.errors, setupPreview: null }, busy: { ...state.busy, setupPreview: false } });
+        const rows = proposal.rows.filter(row => selection[row.id] && setupApplicable(row));
         if (!rows.length) {
           publish({ setupProposal: { ...proposal, rows: proposal.rows.map(row => ({ ...row, after: row.before })) }, setupPreviewReady: true });
           return { ok: true };
         }
-        return request('setupPreview', 'previewSetup', { rows: rows.map(row => ({ id: row.id, text: row.proposedText, roleRevision: row.roleRevision, ...(row.expectedRevision ? { expectedRevision: row.expectedRevision } : {}) })), ...sessionPayload() }, value => {
+        return request('setupPreview', 'previewSetup', { rows: rows.map(row => ({ id: row.id, text: row.proposedText, roleRevision: row.roleRevision, ...(row.expectedRevision ? { expectedRevision: row.expectedRevision } : {}) })), ...(proposal.setupPolicy ? { setupPolicy: proposal.setupPolicy } : {}), ...sessionPayload() }, value => {
           if (proposal !== state.setupProposal || selection !== state.setupSelected || catalog !== state.catalog) return;
-          if (proposal.rows.some(row => !value.resources?.[row.id])) throw { code: 'malformedResponse', message: 'malformedResponse' };
-          publish({ setupProposal: { ...proposal, rows: proposal.rows.map(row => ({ ...row, after: value.resources[row.id] })) }, setupPreviewReady: true });
+          if (proposal.rows.some(row => !value.resources?.[row.id]) || proposal.setupPolicy && (!validText(value.impactRevision) || !Array.isArray(value.impacts))) throw { code: 'malformedResponse', message: 'malformedResponse' };
+          publish({ setupProposal: { ...proposal, rows: proposal.rows.map(row => ({ ...row, after: value.resources[row.id] })) }, setupPreviewReady: true, setupImpacts: value.impacts || [], setupImpactRevision: value.impactRevision || null, setupAccepted: {} });
         });
       }
       function selectSetup(id, checked) {
@@ -490,9 +540,13 @@ window.__ModuleLoader__.load({
         const rows = state.setupProposal?.rows.filter(row => state.setupSelected[row.id] && row.applicable) || [];
         if (!rows.length) return { ok: false };
         if (rows.some(row => isDirty(state.drafts[row.id]))) { error('applySetup', { message: 'draftConflict' }); return { ok: false }; }
+        if (state.setupImpacts.some(impact => state.setupAccepted[impact.id] !== true)) return { ok: false };
         const payload = rows.map(row => ({ id: row.id, text: row.proposedText, roleRevision: row.roleRevision, ...(row.expectedRevision ? { expectedRevision: row.expectedRevision } : {}) }));
-        publish({ setupResult: null, setupProposal: null, setupPreviewReady: false });
-        const answer = await request('applySetup', 'applySetup', { rows: payload, ...sessionPayload() }, value => publish({ setupResult: value }));
+        const policy = state.setupProposal.setupPolicy;
+        if (policy && !state.setupImpactRevision) return { ok: false };
+        const acceptance = policy ? { setupPolicy: policy, impactRevision: state.setupImpactRevision, acceptedIndirectRoles: state.setupImpacts.map(impact => impact.id) } : {};
+        publish({ setupResult: null, setupProposal: null, setupPreviewReady: false, setupImpacts: [], setupAccepted: {}, setupImpactRevision: null });
+        const answer = await request('applySetup', 'applySetup', { rows: payload, ...acceptance, ...sessionPayload() }, value => publish({ setupResult: value }));
         if (disposed) return answer;
         const readback = await loadCatalog();
         if (!answer.ok && !readback.aborted && !disposed) publish({ setupResult: { status: 'reconciled', rows: rows.map(row => ({ id: row.id, status: readback.ok && findOverride(row.id)?.text === row.proposedText ? 'observed' : 'unknown' })) } });
@@ -509,7 +563,7 @@ window.__ModuleLoader__.load({
         activate: () => { disposed = false; },
         dispose: () => { disposed = true; modelGeneration++; for (const controller of requests.values()) controller.abort(); requests.clear(); listeners.clear(); },
         isDisposed: () => disposed,
-        set: publish, error, openSetup, updateSetup, recommendSetup, previewSetup, selectSetup, applySetup, stageSetup, loadCatalog, select, edit, updateForm, setModelMode, updateCandidate, addCandidate, removeCandidate, selectPreviewCandidate, beginCreate, setNewId, setNewBase, importText, save, reset, discard, setSession,
+        set: publish, error, openSetup, updateSetup, setupProtection, addSetupCandidate, updateSetupCandidate, removeSetupCandidate, setSetupCandidateModel, acceptSetupImpact, loadModelMetadata, recommendSetup, previewSetup, selectSetup, applySetup, stageSetup, loadCatalog, select, edit, updateForm, setModelMode, updateCandidate, addCandidate, removeCandidate, selectPreviewCandidate, beginCreate, setNewId, setNewBase, importText, save, reset, discard, setSession,
         loadModels, loadProviders, loadModelOptions, modelOptionsState, modelMetadataState, loadCandidateOptions, loadCandidateMetadata, setCandidateProvider, setCandidateModel, loadPreview, syncReads, refresh,
         loadRuns: () => request('runs', 'runs', sessionPayload(), value => publish({ runs: value.runs })),
         closeResult: () => { requests.get('result')?.abort(); requests.delete('result'); publish({ result: null, resultChild: '', busy: { ...state.busy, result: false }, errors: { ...state.errors, result: null } }); },
@@ -733,49 +787,94 @@ window.__ModuleLoader__.load({
     }
     function SetupPanel({ state, controller, t, locale }) {
       if (!state.setupOpen) return null;
-      const options = state.setupOptions;
+      const options = state.setupOptions, proposal = state.setupProposal;
       const busy = Boolean(state.busy.applySetup);
-      const routePicker = (key, title) => {
-        const route = options[key];
-        const choices = controller.modelOptionsState(route.provider);
-        return h('fieldset', { className: 'ad-candidate', disabled: busy }, h('legend', null, title),
-          h('div', { className: 'ad-fields' },
-            h(Field, { label: t('provider') }, h('select', { value: route.provider, onFocus: () => controller.loadProviders(), onChange: event => { controller.updateSetup({ [key]: { provider: event.target.value, model: '' } }); void controller.loadModelOptions(event.target.value); } }, h('option', { value: '' }, key === 'imageRoute' ? t('setupUseDefault') : t('chooseProvider')), state.providers.map(provider => h('option', { key: provider.id, value: provider.id }, provider.name || provider.id)))),
-            h(Field, { label: t('model') }, h('select', { value: route.model, disabled: !route.provider, 'aria-busy': choices.busy, onFocus: () => controller.loadModelOptions(route.provider), onChange: event => controller.updateSetup({ [key]: { ...route, model: event.target.value } }) }, h('option', { value: '' }, choices.busy ? t('loading') : t('chooseModel')), choices.items.map(model => h('option', { key: model.id, value: model.id }, model.name || model.id))))),
-          h(ErrorNotice, { value: choices.error, t, retry: () => controller.loadModelOptions(route.provider, true) }));
-      };
-      const routeText = resources => resources?.model.mode === 'fixed' ? resources.model.provider + ' / ' + resources.model.model : t(resources?.model.mode === 'auto' ? 'auto' : 'inherit');
-      const proposal = state.setupProposal;
+      const agents = state.catalog?.agents || [];
+      const browserActive = options.includeBrowser && agents.some(agent => options.roleIds.includes(agent.id) && agent.capabilities.some(value => value.startsWith('browser-')));
+      const eligible = agents.filter(agent => !controller.setupProtection(agent));
       const selected = proposal?.rows.filter(row => state.setupSelected[row.id] && row.applicable).length || 0;
+      const pendingAcceptance = state.setupImpacts.some(impact => state.setupAccepted[impact.id] !== true);
+      const pool = options.auto;
+      const strategyIssues = options.mode === 'auto' ? formIssues({ model: pool }) : options.mode === 'fixed' ? formIssues({ model: options.fixed, reasoning: options.fixed.reasoning, ...(options.fixed.outputPolicy.mode === 'set' ? { output: { maxTokens: options.fixed.outputPolicy.maxTokens } } : {}) }) : options.inheritOutputPolicy.mode === 'set' && !validTokens(options.inheritOutputPolicy.maxTokens) ? ['output'] : [];
+      const picker = (route, update, chooseModel) => {
+        const choices = controller.modelOptionsState(route.provider);
+        const exact = controller.modelMetadataState(route.provider, route.model);
+        const list = selectionOptions(route.model, choices.items, choices.loaded);
+        return h(React.Fragment, null,
+          h('div', { className: 'ad-fields' },
+            h(Field, { label: t('provider') }, h('select', { value: route.provider, disabled: busy, onFocus: () => controller.loadProviders(), onChange: event => { update({ provider: event.target.value, model: '', reasoning: { mode: 'model-default' } }); void controller.loadModelOptions(event.target.value); } }, h('option', { value: '' }, t('chooseProvider')), selectionOptions(route.provider, state.providers, state.providersLoaded).map(item => h('option', { key: item.id, value: item.id }, item.name || item.id)))),
+            h(Field, { label: t('model') }, h('select', { value: route.model, disabled: busy || !route.provider, 'aria-busy': choices.busy, onFocus: () => controller.loadModelOptions(route.provider), onChange: event => { if (chooseModel) void chooseModel(event.target.value); else { update({ model: event.target.value, reasoning: { mode: 'model-default' } }); void controller.loadModelMetadata(route.provider, event.target.value); } } }, h('option', { value: '' }, choices.busy ? t('loading') : t('chooseModel')), list.map(item => h('option', { key: item.id, value: item.id }, item.availability ? t(item.availability === 'unavailable' ? 'unavailableOption' : 'uncheckedOption', { value: item.name || item.id }) : item.name || item.id))))),
+          h(ErrorNotice, { value: choices.error, t, retry: () => controller.loadModelOptions(route.provider, true) }),
+          h(ErrorNotice, { value: exact.error, t, retry: () => controller.loadModelMetadata(route.provider, route.model, true) }));
+      };
+      const effort = (value, route, update) => {
+        const exact = controller.modelMetadataState(route.provider, route.model).model;
+        return h(Field, { label: t('effort') }, h('select', { value: value.mode === 'fixed' ? value.effort : '', disabled: busy, onFocus: () => { if (route.provider && route.model) void controller.loadModelMetadata(route.provider, route.model); }, onChange: event => update(event.target.value ? { mode: 'fixed', effort: event.target.value } : { mode: 'model-default' }) }, h('option', { value: '' }, t('defaultEffort')), selectionOptions(value.mode === 'fixed' ? value.effort : '', exact?.efforts || [], Boolean(exact?.metadataResolved)).map(item => h('option', { key: item.id, value: item.id }, item.name || item.id))));
+      };
+      const outputControls = (policy, update) => h(React.Fragment, null,
+        h(Field, { label: t('setupOutputPolicy') }, h('select', { value: policy.mode, disabled: busy, onChange: event => update({ mode: event.target.value }) }, ['preserve', 'set', 'clear'].map(mode => h('option', { key: mode, value: mode }, t('setupOutput.' + mode))))),
+        policy.mode === 'set' && h(Field, { label: t('maxOutput') }, h('input', { type: 'number', min: 1, max: 16777216, required: true, disabled: busy, value: policy.maxTokens ?? '', onChange: event => update({ mode: 'set', maxTokens: event.target.value === '' ? '' : Number(event.target.value) }) })));
+      const resourceText = value => {
+        if (!value) return t('unknown');
+        const reasoning = item => item?.mode === 'fixed' ? item.effort : t(item?.mode === 'inherit-compatible' ? 'inherit' : 'defaultEffort');
+        const model = value.model;
+        if (model.mode === 'auto') return t('auto') + ' · ' + t('defaultCandidate') + ': ' + model.defaultCandidate + ' · ' + model.candidates.map(item => item.id + ' · ' + item.purpose + ' (' + item.provider + '/' + item.model + ', ' + reasoning(item.reasoning) + ', ' + item.maxTokens + ')').join('; ');
+        return (model.mode === 'fixed' ? model.provider + '/' + model.model : t('inherit')) + ' · ' + reasoning(value.reasoning) + ' · ' + t('maxOutput') + ': ' + (value.output?.maxTokens ?? t('inherit'));
+      };
       return h('section', { className: 'ad-new', 'aria-label': t('setupTitle') },
         h('div', { className: 'ad-detail-head' }, h('h3', null, t('setupTitle')), h(Button, { disabled: busy, onClick: () => controller.set({ setupOpen: false }) }, t('close'))),
-        h('p', { className: 'ad-help' }, t('setupHint')),
-        routePicker('defaultRoute', t('setupDefaultModel')), routePicker('imageRoute', t('setupImageModel')),
+        h('p', { className: 'ad-help' }, t('setupStrategyHint')),
+        h(Field, { label: t('setupStrategy') }, h('select', { value: options.mode, disabled: busy, onChange: event => controller.updateSetup({ mode: event.target.value }) }, ['inherit', 'fixed', 'auto'].map(mode => h('option', { key: mode, value: mode }, t('setupMode.' + mode))))),
+        options.mode === 'inherit' && h('p', { className: 'ad-help' }, t('setupInheritHint')),
+        !proposal && h('p', { className: 'ad-help' }, t('setupScopeSummary', { selected: options.roleIds.length, protected: agents.filter(agent => controller.setupProtection(agent)).length })),
+        options.mode === 'inherit' && (options.inheritOutputPolicy.mode !== 'preserve' || agents.some(agent => options.roleIds.includes(agent.id) && agent.output)) && h('details', { className: 'ad-details', open: true }, h('summary', null, t('setupAdvanced')), outputControls(options.inheritOutputPolicy, inheritOutputPolicy => controller.updateSetup({ inheritOutputPolicy }))),
+        options.mode === 'fixed' && h('fieldset', { className: 'ad-candidate', disabled: busy }, h('legend', null, t('setupMode.fixed')),
+          picker(options.fixed, patch => controller.updateSetup({ fixed: { ...options.fixed, ...patch } })),
+          h('details', { className: 'ad-details', open: options.fixed.outputPolicy.mode !== 'preserve' || options.fixed.reasoning.mode === 'fixed' }, h('summary', null, t('setupAdvanced')),
+            effort(options.fixed.reasoning, options.fixed, reasoning => controller.updateSetup({ fixed: { ...options.fixed, reasoning } })),
+            outputControls(options.fixed.outputPolicy, outputPolicy => controller.updateSetup({ fixed: { ...options.fixed, outputPolicy } })))),
+        options.mode === 'auto' && h('div', { className: 'ad-section' },
+          h('p', { className: 'ad-help' }, t('setupAutoHint')),
+          pool.candidates.map(item => h('fieldset', { key: item.id, className: 'ad-candidate', disabled: busy }, h('legend', null, item.id),
+            h(Field, { label: t('candidatePurpose') }, h('input', { value: item.purpose, maxLength: 240, required: true, onChange: event => controller.updateSetupCandidate(item.id, { purpose: event.target.value }) })),
+            picker(item, patch => controller.updateSetupCandidate(item.id, patch), model => controller.setSetupCandidateModel(item.id, model)),
+            effort(item.reasoning, item, reasoning => controller.updateSetupCandidate(item.id, { reasoning })),
+            h(Field, { label: t('maxOutput'), help: t('setupCandidateCapHint') }, h('input', { type: 'number', min: 1, max: 16777216, required: true, value: item.maxTokens, onChange: event => controller.updateSetupCandidate(item.id, { maxTokens: event.target.value === '' ? '' : Number(event.target.value) }) })),
+            h(Button, { disabled: busy || pool.candidates.length <= 1, onClick: () => controller.removeSetupCandidate(item.id) }, t('removeCandidate')))),
+          h(Button, { disabled: busy || pool.candidates.length >= 3, onClick: () => controller.addSetupCandidate() }, t('addCandidate')),
+          h(Field, { label: t('defaultCandidate') }, h('select', { value: pool.defaultCandidate, disabled: busy, required: true, onChange: event => controller.updateSetup({ auto: { ...pool, defaultCandidate: event.target.value } }) }, h('option', { value: '' }, t('setupChooseDefault')), pool.candidates.map(item => h('option', { key: item.id, value: item.id }, item.id + ' · ' + item.purpose))))),
         h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.includeBrowser, disabled: busy, onChange: event => controller.updateSetup({ includeBrowser: event.target.checked }) }), t('setupBrowser')),
+        browserActive && h('details', { className: 'ad-details' }, h('summary', null, t('setupImageModel')),
+          h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.browserSeparate, disabled: busy, onChange: event => controller.updateSetup({ browserSeparate: event.target.checked }) }), t('setupBrowserSeparate')),
+          options.browserSeparate && picker(options.imageRoute, patch => controller.updateSetup({ imageRoute: { ...options.imageRoute, ...patch } }))),
         h('details', { className: 'ad-details' }, h('summary', null, t('setupScope', { count: options.roleIds.length })),
-          h(Button, { disabled: busy, onClick: () => controller.updateSetup({ roleIds: options.roleIds.length === state.catalog.agents.length ? [] : state.catalog.agents.map(agent => agent.id) }) }, t('setupToggleAll')),
-          h('div', { className: 'ad-fields' }, state.catalog.agents.map(agent => h('label', { className: 'ad-check', key: agent.id }, h('input', { type: 'checkbox', disabled: busy, checked: options.roleIds.includes(agent.id), onChange: event => controller.updateSetup({ roleIds: event.target.checked ? [...options.roleIds, agent.id] : options.roleIds.filter(id => id !== agent.id) }) }), locale.resolveText(agent.title))))),
+          h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.scopePolicy === 'replace-selected', disabled: busy, onChange: event => controller.updateSetup({ scopePolicy: event.target.checked ? 'replace-selected' : 'fill-unconfigured' }) }), t('setupReplace')),
+          h('p', { className: 'ad-help' }, t('setupProtectHint')),
+          h(Button, { disabled: busy, onClick: () => controller.updateSetup({ roleIds: eligible.length && eligible.every(agent => options.roleIds.includes(agent.id)) ? [] : eligible.map(agent => agent.id) }) }, t('setupToggleAll')),
+          h('div', { className: 'ad-fields' }, agents.map(agent => { const protectedBy = controller.setupProtection(agent); return h('label', { className: 'ad-check', key: agent.id }, h('input', { type: 'checkbox', disabled: busy || Boolean(protectedBy), checked: options.roleIds.includes(agent.id), onChange: event => controller.updateSetup({ roleIds: event.target.checked ? [...options.roleIds, agent.id] : options.roleIds.filter(id => id !== agent.id) }) }), locale.resolveText(agent.title), protectedBy && h('span', { className: 'ad-help' }, ' · ' + t(protectedBy))); }))),
+        agents.filter(agent => options.roleIds.includes(agent.id) && agent.model.mode === 'auto' && (options.mode !== 'auto' || browserActive && options.browserSeparate && agent.capabilities.some(value => value.startsWith('browser-')))).map(agent => h(Field, { key: agent.id, label: t('setupMigration', { role: locale.resolveText(agent.title) }), help: t('setupMigrationHint') }, h('select', { value: options.resourceMigration[agent.id]?.mode === 'candidate' ? options.resourceMigration[agent.id].candidateId : options.resourceMigration[agent.id]?.mode === 'reset' ? '@reset' : '', disabled: busy, onChange: event => controller.updateSetup({ resourceMigration: { ...options.resourceMigration, [agent.id]: event.target.value === '@reset' ? { mode: 'reset' } : { mode: 'candidate', candidateId: event.target.value } } }) }, h('option', { value: '' }, t('setupMigrationRequired')), h('option', { value: '@reset' }, t('setupMigrationReset')), agent.model.candidates.map(item => h('option', { key: item.id, value: item.id }, item.id + ' · ' + item.maxTokens))))),
         h('p', { className: 'ad-help' }, t('setupLimit')),
-        h(ErrorNotice, { value: state.errors.providers, t, retry: () => controller.loadProviders(true) }),
-        h(ErrorNotice, { value: state.errors.recommend, t }),
-        h('div', { className: 'ad-actions' }, h(Button, { primary: true, disabled: busy || state.busy.recommend || !options.defaultRoute.provider || !options.defaultRoute.model || !options.roleIds.length || Boolean(options.imageRoute.provider && !options.imageRoute.model), onClick: () => controller.recommendSetup() }, t(state.busy.recommend ? 'loading' : 'setupGenerate'))),
+        h(ErrorNotice, { value: state.errors.providers, t, retry: () => controller.loadProviders(true) }), h(ErrorNotice, { value: state.errors.recommend, t }),
+        strategyIssues.length > 0 && h('p', { className: 'ad-warning' }, t('setupInputsIncomplete')),
+        h(Button, { primary: true, disabled: busy || state.busy.recommend || !options.roleIds.length || strategyIssues.length > 0 || browserActive && options.browserSeparate && (!options.imageRoute.provider || !options.imageRoute.model), onClick: () => controller.recommendSetup() }, t(state.busy.recommend ? 'loading' : 'setupGenerate')),
         proposal && h('div', { className: 'ad-section' },
-          h('h4', null, t('setupReview')), h('p', { className: 'ad-help' }, t('setupInheritance')),
-          h(DiagnosticList, { items: proposal.diagnostics, t }),
+          h('h4', null, t('setupReview')), h('p', { className: 'ad-help', role: 'status' }, t('setupReviewSummary', { changed: selected, unchanged: proposal.rows.filter(row => row.status === 'unchanged').length, preserved: proposal.rows.filter(row => row.status === 'preserved').length, blocked: proposal.rows.filter(row => row.status === 'blocked').length, indirect: state.setupPreviewReady ? state.setupImpacts.length : t('setupPreviewPending') })),
+          h('p', { className: 'ad-help' }, t('setupInheritance')), h(DiagnosticList, { items: proposal.diagnostics, t }),
+          !proposal.rows.some(row => row.applicable) && h('p', { role: 'status', className: 'ad-help' }, t(proposal.rows.every(row => row.status === 'unchanged' || row.status === 'preserved') ? 'setupNoChanges' : 'setupNoApplicable')),
           proposal.rows.map(row => h('article', { className: 'ad-candidate', key: row.id },
-            h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: Boolean(state.setupSelected[row.id]), disabled: busy || !row.applicable || isDirty(state.drafts[row.id]), onChange: event => { void controller.selectSetup(row.id, event.target.checked); } }), h('strong', null, locale.resolveText(row.title))),
-            h(Stats, { rows: [[t('setupBefore'), routeText(row.before)], [t('setupAfter'), !state.setupPreviewReady ? t('setupPreviewPending') : row.after ? routeText(row.after) : t('setupNotApplicable')], ...(row.after && state.setupPreviewReady ? [...(state.setupSelected[row.id] ? [[t('effort'), t('defaultEffort')]] : []), [t('target'), row.before.context.targetTokens + ' → ' + row.after.context.targetTokens], [t('elastic'), row.before.context.elasticTokens + ' → ' + row.after.context.elasticTokens]] : [])] }),
-            h(DiagnosticList, { items: [...row.reasons, ...row.warnings], t }),
-            isDirty(state.drafts[row.id]) && h('p', { className: 'ad-warning' }, t('draftConflict')),
+            h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: Boolean(state.setupSelected[row.id]), disabled: busy || !row.applicable || isDirty(state.drafts[row.id]), onChange: event => { void controller.selectSetup(row.id, event.target.checked); } }), h('strong', null, locale.resolveText(row.title)), row.status && h('span', null, ' · ' + t('setupRow.' + row.status))),
+            h(Stats, { rows: [[t('setupBefore'), resourceText(row.before)], [t('setupAfter'), state.setupPreviewReady ? resourceText(row.after) : t('setupPreviewPending')], ...(state.setupPreviewReady && row.after ? [[t('target'), row.before.context.targetTokens + ' → ' + row.after.context.targetTokens], [t('elastic'), row.before.context.elasticTokens + ' → ' + row.after.context.elasticTokens]] : [])] }),
+            h(DiagnosticList, { items: [...row.reasons, ...row.warnings], t }), isDirty(state.drafts[row.id]) && h('p', { className: 'ad-warning' }, t('draftConflict')),
             row.proposedText && h(React.Fragment, null, h(CodeDetail, { title: t('setupYaml'), value: row.proposedText }), h(Button, { disabled: busy || isDirty(state.drafts[row.id]), onClick: () => controller.stageSetup(row.id) }, t('setupEdit'))))),
-          h(ErrorNotice, { value: state.errors.setupPreview, t, retry: () => controller.previewSetup() }),
-          state.busy.setupPreview && h('p', { className: 'ad-help', role: 'status', 'aria-live': 'polite' }, t('setupPreviewPending')),
+          h(ErrorNotice, { value: state.errors.setupPreview, t, retry: () => controller.previewSetup() }), state.busy.setupPreview && h('p', { role: 'status', 'aria-live': 'polite' }, t('setupPreviewPending')),
+          state.setupImpacts.length > 0 && h('section', { className: 'ad-section', 'aria-label': t('setupIndirect') }, h('h4', null, t('setupIndirect')), h('p', { className: 'ad-warning' }, t('setupIndirectHint')),
+            state.setupImpacts.map(impact => h('article', { key: impact.id, className: 'ad-candidate' }, h('strong', null, locale.resolveText(impact.title) + ' · ' + impact.id),
+              h(Stats, { rows: [[t('setupBefore'), resourceText(impact.before)], [t('setupAfter'), resourceText(impact.after)]] }), h(CodeDetail, { title: t('setupPrefixImpacts'), value: impact.prefixes }),
+              h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: state.setupAccepted[impact.id] === true, disabled: busy || !state.setupPreviewReady, onChange: event => controller.acceptSetupImpact(impact.id, event.target.checked) }), t('setupAcceptImpact'))))),
           h('p', { className: 'ad-help' }, t('setupApplyHint')),
-          h(Button, { primary: true, disabled: busy || state.busy.save || state.busy.reset || !state.setupPreviewReady || state.busy.setupPreview || !selected, onClick: () => controller.applySetup() }, t(busy ? 'saving' : 'setupApply', { count: selected }))),
+          h(Button, { primary: true, disabled: busy || state.busy.save || state.busy.reset || !state.setupPreviewReady || state.busy.setupPreview || !selected || pendingAcceptance, onClick: () => controller.applySetup() }, t(busy ? 'saving' : 'setupApply', { count: selected }))),
         h(ErrorNotice, { value: state.errors.applySetup, t }),
-        state.setupResult && h('div', { className: 'ad-section', role: 'status', 'aria-live': 'polite' },
-          h('h4', null, t(state.setupResult.status === 'completed' ? 'setupComplete' : state.setupResult.status === 'reconciled' ? 'setupReconciled' : 'setupStopped')),
-          h('ul', { className: 'ad-list' }, state.setupResult.rows.map(row => h('li', { key: row.id }, h('code', null, row.id), ' · ' + t('setup.status.' + row.status), row.message && h(CodeDetail, { title: t('errorDetails'), value: row.message }))))));
+        state.setupResult && h('div', { className: 'ad-section', role: 'status', 'aria-live': 'polite' }, h('h4', null, t(state.setupResult.status === 'completed' ? 'setupComplete' : state.setupResult.status === 'reconciled' ? 'setupReconciled' : 'setupStopped')), h('ul', { className: 'ad-list' }, state.setupResult.rows.map(row => h('li', { key: row.id }, h('code', null, row.id), ' · ' + t('setup.status.' + row.status), row.message && h(CodeDetail, { title: t('errorDetails'), value: row.message }))))));
     }
     function NewRole({ state, controller, t, locale, exportDraft }) {
       const [discarding, setDiscarding] = React.useState(false);

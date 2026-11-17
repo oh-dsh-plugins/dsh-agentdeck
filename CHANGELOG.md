@@ -2,6 +2,14 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.2.7 — Progressive batch setup
+
+- Align batch generation with native inherit, fixed and auto strategies, with shared complete candidates, explicit defaults and exact metadata only.
+- Preserve configured/disabled/source-owned roles and dirty drafts by default; avoid redundant inheritance writes and require explicit resources when leaving candidate mode.
+- Require version-bound acceptance of indirect resource changes at every saved prefix, including transient changes hidden by a successful final combination.
+- Add progressive bilingual controls, count summaries, stale-consent fencing and native HTTP roundtrip coverage; retain legacy request and partial-save semantics.
+- Require explicit boolean acceptance for indirect impacts, including roles whose IDs match JavaScript prototype names such as `constructor`.
+
 ## 0.2.6 — Localized setup and consistent readiness
 
 - Add owner-only model setup with a selected default route, an optional image route, editable suggestions and explicit per-role apply results.

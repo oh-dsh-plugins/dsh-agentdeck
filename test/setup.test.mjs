@@ -181,6 +181,94 @@ test('role output overrides Session output and no-Session estimates disclose the
  }finally{await f.close();}
 });
 
+const strategyRequest = (strategy, extra = {}) => ({ roleIds: ['reader'], strategy, scopePolicy: 'fill-unconfigured', includeBrowser: false, ...extra });
+const strategyPayload = (proposal, scopePolicy = 'fill-unconfigured') => ({ ...payload(proposal), setupPolicy: { scopePolicy } });
+
+test('new setup defaults can be a no-op and protected overrides require explicit replacement', async () => {
+ const f = await fixture(); try {
+  const p = await f.controller.operation('recommend', strategyRequest({mode:'inherit'}));
+  assert.equal(p.rows[0].status, 'unchanged'); assert.equal(p.rows[0].applicable, false);
+  assert.equal(p.rows[0].proposedText, undefined); assert.equal(f.store.getOverride('reader'), undefined);
+  assert.deepEqual(f.calls.metadata, []);
+  await f.controller.save({id:'reader', text:definition({instructions:'Keep my policy'})});
+  const kept = await f.controller.operation('recommend', strategyRequest({mode:'fixed',provider:'q',model:'large'}));
+  assert.equal(kept.rows[0].status, 'preserved'); assert.equal(kept.rows[0].proposedText, undefined);
+  const changed = await f.controller.operation('recommend', strategyRequest({mode:'fixed',provider:'q',model:'large'}, {scopePolicy:'replace-selected'}));
+  assert.equal(changed.rows[0].status, 'changed');
+  await assert.rejects(f.controller.operation('previewSetup', strategyPayload(changed)), /protected/);
+  const request = strategyPayload(changed, 'replace-selected');
+  const preview = await f.controller.operation('previewSetup', request);
+  await assert.rejects(f.controller.operation('applySetup', request), /preview/);
+  assert.equal((await f.controller.operation('applySetup', {...request, impactRevision:preview.impactRevision, acceptedIndirectRoles:[]})).status, 'completed');
+  assert.match(f.store.getOverride('reader').text, /Keep my policy/);
+ } finally { await f.close(); }
+});
+
+test('new auto strategy authors native independent candidates and requires an exit migration', async () => {
+ const f = await fixture(); try {
+  const p = await f.controller.operation('recommend', strategyRequest({mode:'auto', candidates:pool(), defaultCandidate:'deep'}), f.actor);
+  assert.equal(p.rows[0].status,'changed');
+  assert.deepEqual(f.calls.metadata, [['p','m'],['q','large']]);
+  assert.deepEqual(f.calls.directory,[]); assert.deepEqual(f.calls.config,[]);
+  const request = strategyPayload(p); const preview = await f.controller.operation('previewSetup',request,f.actor);
+  assert.equal((await f.controller.operation('applySetup',{...request,impactRevision:preview.impactRevision},f.actor)).status,'completed');
+  const role = (await f.controller.catalog()).agents.find(role=>role.id==='reader');
+  assert.equal(role.model.mode,'auto'); assert.equal(role.model.defaultCandidate,'deep');
+  assert.deepEqual(role.model.candidates,pool()); assert.equal(role.output,undefined);
+  const exit = strategyRequest({mode:'inherit'},{scopePolicy:'replace-selected'});
+  const blocked = await f.controller.operation('recommend',exit,f.actor);
+  assert.equal(blocked.rows[0].status,'blocked'); assert.equal(blocked.rows[0].proposedText,undefined);
+  const migrated = await f.controller.operation('recommend',{...exit,resourceMigration:{reader:{mode:'candidate',candidateId:'deep'}}},f.actor);
+  assert.equal(migrated.rows[0].status,'changed'); assert.equal(migrated.rows[0].after.output.maxTokens,20000);
+ } finally { await f.close(); }
+});
+
+test('inactive browser strategy does not validate or fetch unrelated routes and mixed contracts reject', async () => {
+ const f = await fixture(); try {
+  const p = await f.controller.operation('recommend',strategyRequest({mode:'inherit'},{browserStrategy:{mode:'fixed',provider:'q'}}));
+  assert.equal(p.rows[0].status,'unchanged'); assert.deepEqual(f.calls.metadata,[]);
+  await assert.rejects(f.controller.operation('recommend',strategyRequest({mode:'inherit'},{defaultRoute:{provider:'q',model:'large'}})),/mix/);
+  await assert.rejects(f.controller.operation('recommend',strategyRequest({mode:'inherit'},{scopePolicy:'all'})),/policy/);
+  await assert.rejects(f.controller.operation('recommend',{roleIds:['reader'],scopePolicy:'fill-unconfigured'}),/strategy/);
+ } finally { await f.close(); }
+});
+
+test('indirect prefix impacts require version-bound acceptance even when final resources match', async () => {
+ const f = await fixture(); try {
+  const save = async (id,patch) => f.controller.save({id,text:JSON.stringify({schemaVersion:2,id,...patch})});
+  await save('base-review',{extends:'reader',model:{mode:'fixed',provider:'p',model:'m'}});
+  await save('middle-review',{extends:'base-review'});
+  await save('protected-review',{extends:'middle-review'});
+  const catalog = await f.controller.catalog();
+  const row = (id,patch) => ({id,text:JSON.stringify({...parseOverrideText(f.store.getOverride(id).text),...patch}),roleRevision:catalog.agents.find(role=>role.id===id).revision,expectedRevision:f.store.getOverride(id).revision});
+  const request = {setupPolicy:{scopePolicy:'replace-selected'},rows:[row('middle-review',{model:{mode:'fixed',provider:'p',model:'m'}}),row('base-review',{model:{mode:'fixed',provider:'q',model:'large'}})]};
+  const preview = await f.controller.operation('previewSetup',request);
+  const impact = preview.impacts.find(value=>value.id==='protected-review');
+  assert.equal(impact.before.model.model,'m'); assert.equal(impact.after.model.model,'m');
+  assert.equal(impact.prefixes.length,1); assert.equal(impact.prefixes[0].afterId,'base-review');
+  assert.equal(impact.prefixes[0].resources.model.model,'large');
+  const originalText = f.store.getOverride('base-review').text;
+  await assert.rejects(f.controller.operation('applySetup',{...request,impactRevision:preview.impactRevision}),/Confirm every/);
+  assert.equal(f.store.getOverride('base-review').text,originalText);
+  await assert.rejects(f.controller.operation('applySetup',{...request,impactRevision:'stale',acceptedIndirectRoles:['protected-review']}),/preview/);
+  const batch = f.store.saveBatch.bind(f.store);
+  f.store.saveBatch = (rows,preflight) => batch(rows,async index=>{await preflight(index);if(index===1)throw new Error('Injected second-write failure');});
+  const result = await f.controller.operation('applySetup',{...request,impactRevision:preview.impactRevision,acceptedIndirectRoles:['protected-review']});
+  assert.equal(result.status,'stopped'); assert.deepEqual(result.rows.map(row=>row.status),['applied','failed']);
+  assert.equal((await f.controller.catalog()).agents.find(role=>role.id==='protected-review').model.model,'large');
+ } finally { await f.close(); }
+});
+
+test('a changed unrelated catalog invalidates setup impact consent before any new writes', async () => {
+ const f = await fixture(); try {
+  const p = await f.controller.operation('recommend',strategyRequest({mode:'fixed',provider:'q',model:'large'}));
+  const request = strategyPayload(p);const preview = await f.controller.operation('previewSetup',request);
+  await f.controller.save({id:'general',text:JSON.stringify({schemaVersion:1,id:'general',instructions:'A separate change'})});
+  await assert.rejects(f.controller.operation('applySetup',{...request,impactRevision:preview.impactRevision}),/preview/);
+  assert.equal(f.store.getOverride('reader'),undefined);
+ } finally { await f.close(); }
+});
+
 test('batch failure preserves successful rows and leaves later rows untouched', async () => {
  const f = await fixture(); try {
   const result=await f.store.saveBatch([{id:'a',text:'first'},{id:'b',text:'second'},{id:'c',text:'third'}],async index=>{if(index===1)throw new Error('Changed external source');});

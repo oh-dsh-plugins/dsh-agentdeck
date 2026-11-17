@@ -26,7 +26,7 @@ AgentDeck does not add a classifier model or a separate execution loop. Configur
 
 | Component | Supported baseline |
 | --- | --- |
-| AgentDeck | `0.2.6` |
+| AgentDeck | `0.2.7` |
 | DeepSeek Harness | **`0.2.2-rc.3`**; other versions are not claimed compatible |
 | Node.js | `>=24.9.0` |
 | Development environment | DSH CLI on `PATH`; the host-link helper uses a POSIX shell |
@@ -39,18 +39,18 @@ DSH supplies its own peer packages. Do not independently upgrade them inside an 
 Install the release from npm into a compatible DSH profile:
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.2.6
+dsh plugin --profile web add dsh-agentdeck@0.2.7
 ```
 
 Use your actual profile name instead of `web`. The DSH plugin manager installs the package and applies its native bundle patch. Restart DSH when the manager requests it, then refresh the existing Harness page.
 
 ### GitHub Release archive
 
-Download `dsh-agentdeck-0.2.6.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
+Download `dsh-agentdeck-0.2.7.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.2.6.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.2.7.tgz
 ```
 
 ### Build from source
@@ -65,7 +65,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.6.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.7.tgz
 ```
 
 Use your actual profile name instead of `web`. `dev:link-host` locates the installed DSH CLI and links its existing public peer packages into this checkout; it does not edit the host or active profile. Set `AGENTDECK_DSH_ROOT` to the installed DSH package directory if the CLI is elsewhere.
@@ -118,6 +118,8 @@ Native completion arrives asynchronously. AgentDeck child IDs and Agent Teams me
 ## Customization
 
 The owner settings page supports enable/disable, actual provider/model/reasoning selects, output and input budgets, YAML editing, derivation, import/export and reset. Save conflicts preserve drafts. Changes apply to new starts; running tasks retain their original role, skills, helper revisions and selected model.
+
+**Batch setup** progressively offers Session inheritance, a fixed model, or one shared pool of 1–3 independently configured candidates. Matching inheritance needs no save. Existing overrides, disabled/source-owned roles and dirty drafts are protected by default; allowing replacement only unlocks manual selection. Review the counts, resource differences and each indirect inherited impact before saving. Leaving candidate mode requires an explicit resource migration or reset. Saves retain successful prefixes on failure; there is no automatic replay or all-or-nothing rollback. See the [batch operation contract](docs/ui-contract.md#progressive-batch-setup).
 
 Definition precedence is factory defaults → plugin-owned user overrides → configured `customAgentDirs` → the active project's `.dsh/agentdeck` directory. Edit a file-owned role in its source or derive it to a new ID. Broken explicit definitions stay invalid with diagnostics; they do not revert silently to factory content.
 

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { loadBuiltinAgents, loadBuiltinSkills, resolveCatalog, parseOverrideText, agentRevision, resolveContextBudget } from '../core/index.js';
 import type { AgentDefinition } from '../core/index.js';
 import { rolePresentation } from '../core/presentation.js';
-import { setupRoleIds, setupRoute, recommendRole, setupResources } from './setup.js';
+import { setupRoleIds, setupRoute, recommendRole, setupResources, normalizeSetupStrategy, setupStrategyRoutes, recommendStrategyRole } from './setup.js';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import type { SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent';
@@ -130,8 +130,9 @@ export class AgentDeckController {
     return {
       agents: catalog.agents.map(role => {
         const choice = roleChoice(role, parent);
-        return this.selectionView(this.roleView(role, names, catalog.blockers.length > 0), choice,
-          routeAuthorization(choice.configured, parent, routes, !!agent, choice.explicit));
+        const source = catalog.layers.find(layer => { if (layer.source.startsWith('user:')) return false; try { return parseOverrideText(layer.text).id === role.id; } catch { return false; } })?.source;
+        return { ...this.selectionView(this.roleView(role, names, catalog.blockers.length > 0), choice,
+          routeAuthorization(choice.configured, parent, routes, !!agent, choice.explicit)), ...(source ? { source } : {}) };
       }),
       diagnostics: [...catalog.diagnostics, ...this.diagnostics.map(message => ({ message }))],
       overrides: this.store.overrides(),
@@ -225,6 +226,8 @@ export class AgentDeckController {
   }
   async recommend(request: JsonObject, actor?: RuntimeAgent, signal = new AbortController().signal): Promise<JsonObject> {
     const ids = setupRoleIds(request.roleIds);
+    if (request.strategy !== undefined) return this.recommendStrategy(request, actor, signal);
+    if (request.scopePolicy !== undefined || request.browserStrategy !== undefined || request.resourceMigration !== undefined) throw new Error('A strategy is required for the new setup request.');
     const defaultRoute = setupRoute(request.defaultRoute);
     const imageRoute = request.imageRoute === undefined ? defaultRoute : setupRoute(request.imageRoute);
     if (request.includeBrowser !== undefined && typeof request.includeBrowser !== 'boolean') throw new Error('includeBrowser must be boolean.');
@@ -255,7 +258,49 @@ export class AgentDeckController {
       params: { provider: model.provider, model: model.id }, message: `Could not read metadata for ${model.provider}/${model.id}.`, original: model.error }));
     return { rows, models, diagnostics };
   }
+  private setupPolicy(value: unknown): { scopePolicy: 'fill-unconfigured' | 'replace-selected' } {
+    const policy = object(value, 'setupPolicy');
+    if (Object.keys(policy).some(key => key !== 'scopePolicy') || !['fill-unconfigured', 'replace-selected'].includes(policy.scopePolicy)) throw new Error('Unknown setup scope policy.');
+    return { scopePolicy: policy.scopePolicy };
+  }
+  private async recommendStrategy(request: JsonObject, actor: RuntimeAgent | undefined, signal: AbortSignal): Promise<JsonObject> {
+    if (request.defaultRoute !== undefined || request.imageRoute !== undefined) throw new Error('Do not mix legacy routes with a setup strategy.');
+    const ids = setupRoleIds(request.roleIds);
+    const strategy = normalizeSetupStrategy(request.strategy);
+    const policy = this.setupPolicy({ scopePolicy: request.scopePolicy ?? 'fill-unconfigured' });
+    if (request.includeBrowser !== undefined && typeof request.includeBrowser !== 'boolean') throw new Error('includeBrowser must be boolean.');
+    const current = await this.resolved(actor);
+    if (current.blockers.length) throw new Error('Resolve unreadable role sources before generating settings.');
+    const roles = ids.map(id => { const role = current.agents.find(value => value.id === id); if (!role) throw new Error('Unknown or invalid agent: ' + id); return role; });
+    const isBrowser = (role: AgentDefinition) => role.capabilities.some(value => value.startsWith('browser-'));
+    const browserRelevant = request.includeBrowser !== false && roles.some(isBrowser);
+    // Inactive browser input cannot cause metadata fanout or block an unrelated role.
+    const browserStrategy = browserRelevant && request.browserStrategy !== undefined ? normalizeSetupStrategy(request.browserStrategy) : strategy;
+    const strategies = roles.filter(role => !isBrowser(role) || browserRelevant).map(role => isBrowser(role) ? browserStrategy : strategy);
+    const parent = delegationSelection(actor);
+    const routes = strategies.flatMap(value => setupStrategyRoutes(value));
+    if (strategies.some(value => value.mode === 'inherit') && parent?.provider && parent.model) routes.push({ provider: parent.provider, model: parent.model });
+    const uniqueRoutes = [...new Map(routes.map(route => [JSON.stringify(route), route])).values()];
+    const models: JsonObject[] = (await Promise.all(uniqueRoutes.map(route => modelDirectory(this.ctx, actor, route, signal, true)))).flatMap(result => result.models);
+    signal.throwIfAborted();
+    const migrations = request.resourceMigration === undefined ? {} : object(request.resourceMigration, 'resourceMigration');
+    if (Object.keys(migrations).some(id => !ids.includes(id))) throw new Error('Resource migration must name a selected role.');
+    const names = this.names();
+    const rows = roles.map(role => {
+      const external = current.layers.find(layer => { if (layer.source.startsWith('user:')) return false; try { return parseOverrideText(layer.text).id === role.id; } catch { return false; } });
+      const view = this.roleView(role, names);
+      return recommendStrategyRole(role, this.store.getOverride(role.id), isBrowser(role) ? browserStrategy : strategy, models, {
+        ...policy, resourceMigration: migrations[role.id], externalSource: external?.source, includeBrowser: request.includeBrowser !== false, parent,
+        capabilitiesMissing: view.missingCapabilities.length > 0 || view.unverifiedCapabilities.length > 0,
+      });
+    });
+    // Return independent rows first. One invalid combination must not destroy valid suggestions.
+    const diagnostics = models.filter(model => !model.metadataResolved && model.error).map(model => ({ code: 'setup.metadataFailed', params: { provider: model.provider, model: model.id }, message:             'Could not read metadata for ' + model.provider + '/' + model.id + '.', original: model.error }));
+    return { rows, models, diagnostics, setupPolicy: policy };
+  }
   private async prepareSetup(request: JsonObject, actor?: RuntimeAgent) {
+    const policy = request.setupPolicy === undefined ? undefined : this.setupPolicy(request.setupPolicy);
+    if (!policy && (request.impactRevision !== undefined || request.acceptedIndirectRoles !== undefined)) throw new Error('Impact acceptance requires a setup policy.');
     const ids = setupRoleIds(Array.isArray(request.rows) ? request.rows.map(row => object(row).id) : undefined);
     const rows = (request.rows as unknown[]).map((value, index) => {
       const row = object(value); const text = requiredString(row.text, 'text', 1024 * 1024);
@@ -266,6 +311,7 @@ export class AgentDeckController {
     if (initial.blockers.length) throw new Error('Resolve unreadable role sources before saving.');
     const original = new Map(initial.agents.map(role => [role.id, role]));
     for (const row of rows) {
+      if (policy?.scopePolicy === 'fill-unconfigured' && (this.store.getOverride(row.id) || original.get(row.id)?.enabled === false)) throw new Error('Existing or disabled settings are protected. Explicitly choose replacement and regenerate.');
       if (!original.has(row.id) || agentRevision(original.get(row.id)!) !== row.roleRevision || this.store.getOverride(row.id)?.revision !== row.expectedRevision) throw new Error('Agent configuration changed. Regenerate suggestions before applying.');
       if (initial.layers.some(layer => { if (layer.source.startsWith('user:')) return false; try { return parseOverrideText(layer.text).id === row.id; } catch { return false; } })) throw new Error('This agent is owned by a source file. Edit that file instead.');
     }
@@ -277,23 +323,42 @@ export class AgentDeckController {
     const files = initial.layers.filter(layer => !layer.source.startsWith('user:'));
     const baselineIssues = new Set(initial.diagnostics.map(issue => JSON.stringify(issue)));
     let proposed = initial;
+    const selected = new Set(rows.map(row => row.id));
+    const impacts = new Map<string, JsonObject>();
     for (const row of rows) {
       user.set('user:' + row.id, { source: 'user:' + row.id, text: row.text });
       const layers = [...[...user.values()].sort((a, b) => a.source.localeCompare(b.source)), ...files];
       const next = resolveCatalog(layers);
       const issues = next.diagnostics.filter(issue => !baselineIssues.has(JSON.stringify(issue)));
       if (issues.length || initial.agents.some(role => !next.agents.some(value => value.id === role.id))) throw new Error(issues.map(issue => issue.message).join('\n') || 'The selection invalidates a derived agent.');
+      for (const role of next.agents) {
+        const before = original.get(role.id);
+        if (!selected.has(role.id) && (!before || digest(setupResources(before)) !== digest(setupResources(role)))) {
+          const impact = impacts.get(role.id) ?? { id: role.id, title: role.title, before: before ? setupResources(before) : null, prefixes: [] };
+          impact.prefixes.push({ afterId: row.id, resources: setupResources(role) });
+          impacts.set(role.id, impact);
+        }
+      }
       proposed = { ...next, layers, blockers: [] };
       expected.push(fingerprint(proposed));
     }
-    return { rows, expected, fingerprint, proposed };
+    for (const impact of impacts.values()) impact.after = setupResources(proposed.agents.find(role => role.id === impact.id)!);
+    const impactList = [...impacts.values()].sort((a, b) => a.id.localeCompare(b.id));
+    const impactRevision = digest({ rows, expected, policy, actor: actor?.id, impacts: impactList });
+    return { rows, expected, fingerprint, proposed, policy, impacts: impactList, impactRevision };
   }
   async previewSetup(request: JsonObject, actor?: RuntimeAgent): Promise<JsonObject> {
-    const { proposed } = await this.prepareSetup(request, actor);
-    return { resources: Object.fromEntries(proposed.agents.map(role => [role.id, setupResources(role)])) };
+    const { proposed, impacts, impactRevision } = await this.prepareSetup(request, actor);
+    return { resources: Object.fromEntries(proposed.agents.map(role => [role.id, setupResources(role)])), impacts, impactRevision };
   }
   async applySetup(request: JsonObject, actor?: RuntimeAgent): Promise<JsonObject> {
-    const { rows, expected, fingerprint } = await this.prepareSetup(request, actor);
+    const { rows, expected, fingerprint, policy, impacts, impactRevision } = await this.prepareSetup(request, actor);
+    if (policy) {
+      if (request.impactRevision !== impactRevision) throw new Error('Setup impact preview changed or is missing. Preview the exact selection again.');
+      const accepted = request.acceptedIndirectRoles ?? [];
+      if (!Array.isArray(accepted) || accepted.some(id => typeof id !== 'string') || new Set(accepted).size !== accepted.length || accepted.some(id => !impacts.some(impact => impact.id === id))) throw new Error('Indirect role acceptance must match the current impact preview.');
+      if (impacts.some(impact => !accepted.includes(impact.id))) throw new Error('Confirm every indirect role impact, including intermediate saved prefixes, before applying.');
+    }
     return this.store.saveBatch(rows, async index => {
       if (fingerprint(await this.resolved(actor)) !== expected[index]) throw new Error('Agent configuration changed. Refresh and regenerate suggestions before continuing.');
     });

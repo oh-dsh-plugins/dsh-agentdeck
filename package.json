@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentdeck",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
   "description": "Ready-to-use scene agents for DeepSeek Harness with native delegation, explicit model settings and extensible skills.",
   "keywords": ["deepseek-harness", "deepseek-harness-plugin", "dsh", "dsh-plugin", "agents", "subagents", "agent-skills", "model-selection", "typescript"],

@@ -229,6 +229,43 @@ test('actual Client controller reads and saves/resets isolated definitions over 
   } finally { controller?.dispose(); await f.close(); }
 });
 
+for (const derivedId of ['rpc-derived-reader', 'constructor'])
+test(`actual Client batch candidates and inherited-impact consent roundtrip over native HTTP (${derivedId})`, async () => {
+  const plugin = await clientPlugin(); const f = await fixture(); let controller;
+  try {
+    controller = plugin.createController({ rpc: f.rpc });
+    controller.setSession(f.h.parent.id);
+    value(await f.rpc.call('/agentdeck', 'agentdeck.save', { id: derivedId, text: `schemaVersion: 2\nid: ${derivedId}\nextends: reader\n`, sessionId: f.h.parent.id }));
+    value(await controller.loadCatalog()); controller.openSetup();
+    controller.updateSetup({ roleIds: ['reader'] }); value(await controller.recommendSetup());
+    assert.equal(controller.getSnapshot().setupProposal.rows[0].status, 'unchanged');
+    assert.equal((await controller.applySetup()).ok, false);
+    assert.equal(value(await f.rpc.call('/agentdeck', 'agentdeck.catalog', {})).overrides.length, 1);
+    const candidate = (id, maxTokens) => ({ id, purpose: 'Explicit fixture purpose ' + id, ...ROUTE, reasoning: { mode: 'model-default' }, maxTokens });
+    controller.updateSetup({ mode: 'auto', auto: { mode: 'auto', candidates: [candidate('short', 2000), candidate('long', 6000)], defaultCandidate: 'short' } });
+    value(await controller.recommendSetup());
+    assert.equal(controller.getSnapshot().setupPreviewReady, true, JSON.stringify(controller.getSnapshot().errors));
+    const impacts = controller.getSnapshot().setupImpacts;
+    assert.ok(impacts.some(role => role.id === derivedId));
+    assert.equal((await controller.applySetup()).ok, false);
+    for (const role of impacts) controller.acceptSetupImpact(role.id, true);
+    value(await controller.applySetup());
+    const saved = controller.getSnapshot().catalog;
+    assert.equal(saved.overrides.length, 2);
+    assert.equal(saved.agents.find(role => role.id === 'reader').model.candidates[1].maxTokens, 6000);
+    assert.equal(saved.agents.find(role => role.id === derivedId).model.mode, 'auto');
+    controller.updateSetup({ scopePolicy: 'replace-selected', mode: 'inherit', roleIds: ['reader'] });
+    value(await controller.recommendSetup()); assert.equal(controller.getSnapshot().setupProposal.rows[0].status, 'blocked');
+    controller.updateSetup({ resourceMigration: { reader: { mode: 'candidate', candidateId: 'long' } } });
+    value(await controller.recommendSetup());
+    for (const role of controller.getSnapshot().setupImpacts) controller.acceptSetupImpact(role.id, true);
+    value(await controller.applySetup());
+    const inherited = controller.getSnapshot().catalog.agents.find(role => role.id === 'reader');
+    assert.equal(inherited.model.mode, 'inherit'); assert.equal(inherited.output.maxTokens, 6000);
+    assert.equal(f.h.starts.length, 0); assert.equal(f.h.adapter.requests.length, 0);
+  } finally { controller?.dispose(); await f.close(); }
+});
+
 test('native HTTP authentication and Host/Origin fence restrict AgentDeck to signed owner requests', async () => {
   const f = await fixture();
   try {

@@ -26,7 +26,7 @@ AgentDeck 不增加分类模型或独立执行循环。配置了某项能力或�
 
 | 组件 | 支持基线 |
 | --- | --- |
-| AgentDeck | `0.2.6` |
+| AgentDeck | `0.2.7` |
 | DeepSeek Harness | **`0.2.2-rc.3`**；不声明兼容其他版本 |
 | Node.js | `>=24.9.0` |
 | 开发环境 | `PATH` 中可找到 DSH CLI；宿主依赖链接脚本使用 POSIX shell |
@@ -39,18 +39,18 @@ DSH 提供自身的同伴依赖（peer dependencies）。不要为了满足本�
 将 npm 上的发行版本安装到兼容的 DSH 配置档：
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.2.6
+dsh plugin --profile web add dsh-agentdeck@0.2.7
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。DSH 插件管理器负责安装软件包并应用原生组合补丁。管理器提示需要重启时，重启 DSH，再刷新已有 Harness 页面。
 
 ### GitHub Release 安装包
 
-从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.2.6.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
+从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.2.7.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.2.6.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.2.7.tgz
 ```
 
 ### 从源码构建
@@ -65,7 +65,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.6.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.7.tgz
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。`dev:link-host` 查找已安装的 DSH CLI，并将其现有公开同伴依赖链接到当前项目，不修改宿主或活动配置档。CLI 位于其他位置时，可通过 `AGENTDECK_DSH_ROOT` 指定已安装的 DSH 包目录。
@@ -118,6 +118,8 @@ dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.6.tgz
 ## 定制
 
 所有者设置页支持启停、真实提供商／模型／思考等级选择、输出与输入预算、YAML 编辑、派生、导入导出及重置。保存冲突会保留草稿。修改作用于新启动任务；运行中的任务保留原角色、技能、辅助脚本版本及已选模型。
+
+**批量配置助手**按需展示跟随会话、指定模型或共享的 1–3 个独立候选。已有一致的继承配置无需保存；默认保护已有覆盖、禁用／文件所有的角色及未保存草稿，允许替换只解锁手动选择。保存前审阅数量摘要、资源差异及逐项继承影响；退出候选模式必须明确迁移或重置资源。中途失败会保留已成功的前缀，不自动重试或承诺整体回滚。详见[批量操作契约](docs/ui-contract.md#progressive-batch-setup)。
 
 定义优先级依次为：出厂默认 → 插件自有的用户覆盖项 → `customAgentDirs` 配置目录 → 活动项目的 `.dsh/agentdeck` 目录。文件定义的角色应在源文件修改，或派生到新 ID。损坏的显式定义保持无效并给出诊断，不静默恢复为出厂内容。
 
