@@ -283,6 +283,30 @@ test('latest cancelled or running turn cannot inherit an older completed report'
   assert.equal(running.summary, '');
 });
 
+test('result continuation requires the same report revision', async () => {
+  const started = turn('turn/start', { turn: 1 });
+  const message = assistant(report);
+  const first = await readRunResult(resultContext([started, message]), run, 0, 12);
+  assert.match(first.resultRevision, /^[a-f0-9]{64}$/);
+  const nextOffset = first.nextOffset;
+  await assert.rejects(readRunResult(resultContext([started, message]), run, nextOffset, 50_000), /revision.*first page/i);
+
+  const usageOnly = assistant(report);
+  usageOnly.data.usage = { inputTokens: 10 };
+  const second = await readRunResult(resultContext([started, usageOnly]), run, nextOffset, 50_000, first.resultRevision);
+  assert.equal(first.rawText + second.rawText, JSON.stringify(report));
+  assert.deepEqual(second.evidence, first.evidence);
+
+  const updates = [
+    [started, assistant({ ...report, summary: 'Updated in the same turn' })],
+    [started, message, turn('turn/end', { reason: { kind: 'completed' } })],
+    [started, message, turn('turn/start', { turn: 2 }), message],
+  ];
+  for (const events of updates) {
+    await assert.rejects(readRunResult(resultContext(events), run, nextOffset, 50_000, first.resultRevision), /revision.*first page/i);
+  }
+});
+
 test('native failure and token ceiling constrain even a structured completed claim', async () => {
   for (const [kind, expected] of [['error', 'failed'], ['max-tokens', 'partial'], ['interrupted', 'cancelled']]) {
     const result = await readRunResult(resultContext([turn('turn/start'), assistant(report), turn('turn/end', { reason: { kind } })]), run);

@@ -7,17 +7,20 @@ import test from 'node:test';
 // element recorder. This does not claim browser layout/accessibility verification.
 const source = (await readFile(new URL('../lib/client.js',import.meta.url),'utf8'))
  .replace('createController, definitionText,','SetupPanel, createController, definitionText,');
-let registration;
-vm.runInNewContext(source,{window:{__ModuleLoader__:{load(value){registration=value;}}},AbortController,TextEncoder,setTimeout,clearTimeout});
 const React = { Fragment:'fragment',createElement(type,props,...children){return typeof type==='function'?type({...props,children}):{type,props:props||{},children:children.flat(Infinity).filter(v=>v!==null&&v!==false&&v!==undefined)};} };
-const plugin=registration.factory(()=>React);
+function loadPlugin(timers = { setTimeout, clearTimeout }) {
+ let registration;
+ vm.runInNewContext(source,{window:{__ModuleLoader__:{load(value){registration=value;}}},AbortController,TextEncoder,...timers});
+ return registration.factory(()=>React);
+}
+const plugin=loadPlugin();
 const clone=value=>JSON.parse(JSON.stringify(value));
 const base={schemaVersion:1,id:'reader',title:{en:'Reader',zh:'阅读'},description:{en:'Read',zh:'读'},instructions:'Read.',enabled:true,capabilities:[],skills:[],scripts:[],inputs:[],deliverables:[],model:{mode:'inherit'},reasoning:{mode:'inherit-compatible'},context:{targetTokens:1000,elasticTokens:2000},revision:'reader-v1'};
 const resources=role=>({model:role.model,reasoning:role.reasoning,context:role.context});
 const catalog=(agents=[base],overrides=[])=>({agents,overrides,diagnostics:[],sessions:[],runtime:{}});
 const ok=value=>({ok:true,value});
 const deferred=()=>{let resolve;return {promise:new Promise(done=>resolve=done),resolve:value=>resolve(value)}};
-function harness(responder){const calls=[];return {calls,controller:plugin.createController({rpc:{call(channel,endpoint,payload){calls.push({endpoint,payload:clone(payload)});return responder(endpoint,payload);}}})};}
+function harness(responder, client = plugin){const calls=[];return {calls,controller:client.createController({rpc:{call(channel,endpoint,payload){calls.push({endpoint,payload:clone(payload)});return responder(endpoint,payload);}}})};}
 function flatten(node){return !node||typeof node!=='object'?[]:[node,...(node.children||[]).flatMap(flatten)];}
 function render(controller){const state=controller.getSnapshot();return plugin.SetupPanel({state,controller,t:(key,params)=>{assert.ok(Object.hasOwn(plugin.dictionaries.en,key),'Missing visible locale: '+key);return plugin.dictionaries.en[key].replace(/\{(\w+)\}/g,(_,key)=>params?.[key]??key);},locale:{resolveText:value=>value.en}});}
 
@@ -32,11 +35,74 @@ test('first open selects only clean unconfigured owned roles and never reseeds a
  }finally{f.controller.dispose();}
 });
 
-test('inherit generation needs no route and no-op rows never preview or save',async()=>{
+test('inherit generation uses the AI proposal route and no-op rows never preview or save',async()=>{
  const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[{id:'reader',title:base.title,status:'unchanged',applicable:false,before:resources(base),after:resources(base),reasons:[],warnings:[]}]}:{providers:[],models:[]}));
- try{await f.controller.loadCatalog();f.controller.openSetup();await f.controller.recommendSetup();
- assert.deepEqual(f.calls.find(call=>call.endpoint==='agentdeck.recommend').payload.strategy,{mode:'inherit'});
+ try{await f.controller.loadCatalog();f.controller.openSetup();f.controller.updateSetup({proposalGenerator:{provider:'p',model:'m'}});await f.controller.recommendSetup();
+ const call=f.calls.find(value=>value.endpoint==='agentdeck.recommend');assert.equal(Object.hasOwn(call.payload,'strategy'),false);
+ assert.deepEqual(call.payload.generatorRoute,{provider:'p',model:'m'});
  assert.equal(f.calls.some(call=>call.endpoint==='agentdeck.previewSetup'),false);assert.equal((await f.controller.applySetup()).ok,false);render(f.controller);
+ }finally{f.controller.dispose();}
+});
+
+test('switching AI provider survives a model-list response carrying the Session default', async()=>{
+ const providers=[{id:'p'},{id:'q'}], selection={provider:'p',model:'m'}, q=deferred();
+ const f=harness((endpoint,payload)=>endpoint==='agentdeck.catalog'?ok(catalog()):payload.provider==='q'&&!payload.model?q.promise:ok({providers,models:[],selection}));
+ try {
+  await f.controller.loadCatalog(); f.controller.openSetup(); await f.controller.loadProviders();
+  const selects=()=>flatten(render(f.controller)).filter(node=>node.type==='select');
+  selects().find(node=>node.props.value==='p').props.onChange({target:{value:'q'}});
+  const loading=f.controller.loadModelOptions('q');
+  q.resolve(ok({providers,models:[{id:'large',provider:'q',authorized:true}],selection}));
+  await loading;
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator),{provider:'q',model:''});
+  selects().find(node=>node.children.some(child=>child?.props?.value==='large')).props.onChange({target:{value:'large'}});
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator),{provider:'q',model:'large'});
+ } finally { f.controller.dispose(); }
+});
+
+test('fixed setup shows migration for each included auto role in a mixed batch', async()=>{
+ const auto={mode:'auto',defaultCandidate:'old',candidates:[{id:'old',maxTokens:1000}]};
+ const agents=[{...base,model:auto},{...base,id:'browser',title:{en:'Browser',zh:'Browser'},model:auto,capabilities:['browser-read']}];
+ const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog(agents):{providers:[],models:[]}));
+ try {
+  await f.controller.loadCatalog(); f.controller.openSetup(); f.controller.updateSetup({mode:'fixed'});
+  const migrations=()=>flatten(render(f.controller)).filter(node=>node.type==='select'&&node.children.some(child=>child?.props?.value==='@reset'));
+  assert.equal(migrations().length,2);
+  f.controller.updateSetup({browserSeparate:true}); assert.equal(migrations().length,2);
+  f.controller.updateSetup({includeBrowser:false}); assert.equal(migrations().length,1);
+ } finally { f.controller.dispose(); }
+});
+
+test('AI proposal can outlive the ordinary read timeout but still has an aborting deadline',async()=>{
+ const timers=[];
+ const client=loadPlugin({setTimeout(fn,ms){const timer={fn,ms};timers.push(timer);return timer;},clearTimeout(timer){if(timer)timer.cleared=true;}});
+ const pending=deferred();
+ const f=harness(endpoint=>endpoint==='agentdeck.catalog'?ok(catalog()):pending.promise,client);
+ try {
+  await f.controller.loadCatalog();
+  assert.equal(timers.at(-1).ms,15000);
+  f.controller.updateSetup({roleIds:['reader']});
+  const proposal=f.controller.recommendSetup();
+  const deadline=timers.at(-1);
+  assert.equal(deadline.ms,120000);
+  deadline.fn();
+  const result=await proposal;
+  assert.equal(result.error.code,'requestTimeout');
+  assert.equal(f.controller.getSnapshot().busy.recommend,false);
+ } finally { f.controller.dispose(); }
+});
+
+test('auto setup asks AI without a prebuilt candidate pool',async()=>{
+ const response={setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[{id:'reader',title:base.title,status:'unchanged',applicable:false,before:resources(base),after:resources(base),reasons:[],warnings:[]}]};
+ const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?response:{providers:[],models:[]}));
+ try{await f.controller.loadCatalog();f.controller.openSetup();f.controller.updateSetup({mode:'auto'});
+  const nodes=flatten(render(f.controller));
+  assert.ok(nodes.some(node=>node.type==='p'&&node.children.includes(plugin.dictionaries.en.setupAiProposalHint)));
+  await f.controller.recommendSetup();
+  const call=f.calls.find(value=>value.endpoint==='agentdeck.recommend');
+  assert.equal(Object.hasOwn(call.payload,'strategy'),false);
+  assert.equal(Object.hasOwn(call.payload,'browserStrategy'),false);
+  assert.deepEqual(call.payload.scopePolicy,'fill-unconfigured');
  }finally{f.controller.dispose();}
 });
 
@@ -96,12 +162,13 @@ test('constructor impact requires explicit boolean consent in the UI and apply r
  }finally{f.controller.dispose();}
 });
 
-test('existing inherited output exposes an explicit clear choice without contaminating fixed inputs',async()=>{
+test('inherit mode uses the AI form and preserves fixed inputs',async()=>{
  const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog([{...base,output:{maxTokens:2000}}]):endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[]}:{providers:[],models:[]}));
  try{await f.controller.loadCatalog();f.controller.openSetup();
- assert.ok(flatten(render(f.controller)).some(node=>node.type==='details'&&node.props.open===true));
- f.controller.updateSetup({inheritOutputPolicy:{mode:'clear'}});f.controller.updateSetup({mode:'fixed'});f.controller.updateSetup({mode:'inherit'});await f.controller.recommendSetup();
- assert.deepEqual(f.calls.find(call=>call.endpoint==='agentdeck.recommend').payload.strategy,{mode:'inherit',outputPolicy:{mode:'clear'}});
+ assert.equal(flatten(render(f.controller)).some(node=>node.type==='details'&&node.props.open===true),false);
+ f.controller.updateSetup({inheritOutputPolicy:{mode:'clear'},proposalGenerator:{provider:'p',model:'m'}});f.controller.updateSetup({mode:'fixed'});f.controller.updateSetup({mode:'inherit'});await f.controller.recommendSetup();
+ const call=f.calls.find(value=>value.endpoint==='agentdeck.recommend');assert.equal(Object.hasOwn(call.payload,'strategy'),false);
+ assert.deepEqual(call.payload.generatorRoute,{provider:'p',model:'m'});
  assert.equal(f.controller.getSnapshot().setupOptions.fixed.outputPolicy.mode,'preserve');
  }finally{f.controller.dispose();}
 });

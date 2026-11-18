@@ -2,6 +2,12 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.2.8 — AI-assisted setup and configuration safeguards
+
+- Generate separate candidate strategies for each selected role using an authorized model. Preserve protected roles and validate model metadata, cancellation, and response limits.
+- Restrict configuration writes to the owner interface and prevent saves, resets, and batch prefixes from invalidating roles in the current session or global catalog.
+- Bind result pagination to a single result revision so a new turn cannot mix with earlier pages.
+
 ## 0.2.7 — Progressive batch setup
 
 - Align batch generation with native inherit, fixed and auto strategies, with shared complete candidates, explicit defaults and exact metadata only.

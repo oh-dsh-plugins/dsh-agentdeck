@@ -26,7 +26,7 @@ AgentDeck 不增加分类模型或独立执行循环。配置了某项能力或�
 
 | 组件 | 支持基线 |
 | --- | --- |
-| AgentDeck | `0.2.7` |
+| AgentDeck | `0.2.8` |
 | DeepSeek Harness | **`0.2.2-rc.3`**；不声明兼容其他版本 |
 | Node.js | `>=24.9.0` |
 | 开发环境 | `PATH` 中可找到 DSH CLI；宿主依赖链接脚本使用 POSIX shell |
@@ -39,18 +39,18 @@ DSH 提供自身的同伴依赖（peer dependencies）。不要为了满足本�
 将 npm 上的发行版本安装到兼容的 DSH 配置档：
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.2.7
+dsh plugin --profile web add dsh-agentdeck@0.2.8
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。DSH 插件管理器负责安装软件包并应用原生组合补丁。管理器提示需要重启时，重启 DSH，再刷新已有 Harness 页面。
 
 ### GitHub Release 安装包
 
-从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.2.7.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
+从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.2.8.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.2.7.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.2.8.tgz
 ```
 
 ### 从源码构建
@@ -65,7 +65,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.7.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.8.tgz
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。`dev:link-host` 查找已安装的 DSH CLI，并将其现有公开同伴依赖链接到当前项目，不修改宿主或活动配置档。CLI 位于其他位置时，可通过 `AGENTDECK_DSH_ROOT` 指定已安装的 DSH 包目录。
@@ -108,10 +108,10 @@ dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.7.tgz
 
 | 工具 | 行为 |
 | --- | --- |
-| `scene_agent_catalog` | 列出或读取角色、发现模型、预览设置、读取精简候选项及任务；模型侧编辑可收窄普通设置，不能改变模型和资源策略 |
+| `scene_agent_catalog` | 列出或读取角色、发现模型、预览设置、读取精简候选项及任务；保存和重置请使用所有者管理页面 |
 | `scene_agent_start` | 启动原生子代理并返回会话 ID；省略角色时使用 `general` |
 | `scene_agent_control` | 使用 `childId` 查看状态、继续或中断直属子代理 |
-| `scene_agent_result` | 读取证据和分页输出，不重新启动任务 |
+| `scene_agent_result` | 读取证据和分页输出。续页传入 `nextOffset` 作为 `offset`，并附带 `resultRevision` |
 
 原生完成通知异步到达。AgentDeck 子代理 ID 与 Agent Teams 成员名称属于不同命名空间。空闲状态本身不代表任务成功完成。
 

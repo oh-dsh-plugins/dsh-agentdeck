@@ -75,7 +75,7 @@ window.__ModuleLoader__.load({
       let state = {
         catalog: null, selectedId: '', sessionId: '', tab: 'roles', drafts: {},
         evidence: {}, setupOpen: false, setupSeeded: false,
-        setupOptions: { mode: 'inherit', inheritOutputPolicy: { mode: 'preserve' }, fixed: { mode: 'fixed', provider: '', model: '', reasoning: { mode: 'model-default' }, outputPolicy: { mode: 'preserve' } }, auto: { mode: 'auto', candidates: [], defaultCandidate: '' }, scopePolicy: 'fill-unconfigured', defaultRoute: { provider: '', model: '' }, imageRoute: { provider: '', model: '' }, includeBrowser: true, browserSeparate: false, resourceMigration: {}, roleIds: [] },
+        setupOptions: { mode: 'inherit', inheritOutputPolicy: { mode: 'preserve' }, fixed: { mode: 'fixed', provider: '', model: '', reasoning: { mode: 'model-default' }, outputPolicy: { mode: 'preserve' } }, auto: { mode: 'auto', candidates: [], defaultCandidate: '' }, proposalGenerator: { provider: '', model: '' }, scopePolicy: 'fill-unconfigured', defaultRoute: { provider: '', model: '' }, imageRoute: { provider: '', model: '' }, includeBrowser: true, browserSeparate: false, resourceMigration: {}, roleIds: [] },
         setupProposal: null, setupSelected: {}, setupPreviewReady: false, setupImpacts: [], setupImpactRevision: null, setupAccepted: {}, setupResult: null,
         models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, previewCandidates: {}, runs: null, result: null, resultChild: '',
         creating: false, newId: '', newBase: 'general', imported: false,
@@ -90,13 +90,14 @@ window.__ModuleLoader__.load({
       const providerLists = new Map();
       const exactModels = new Map();
       let providersRead;
+      let generatorTouched = false;
       const publish = patch => {
         if (disposed) return;
         state = { ...state, ...patch };
         for (const listener of listeners) listener();
       };
       function error(key, value) { publish({ errors: { ...state.errors, [key]: value ? fault(value) : null } }); }
-      async function request(key, endpoint, payload, accept) {
+      async function request(key, endpoint, payload, accept, timeoutMs = 15000) {
         requests.get(key)?.abort();
         const controller = new AbortController();
         requests.set(key, controller);
@@ -116,7 +117,7 @@ window.__ModuleLoader__.load({
               timedOut = true;
               reject({ code: 'requestTimeout', message: 'requestTimeout' });
               controller.abort();
-            }, 15000);
+            }, timeoutMs);
           })]) : call);
           if (disposed || controller.signal.aborted || requests.get(key) !== controller) return { ok: false, aborted: true };
           if (!result || typeof result.ok !== 'boolean') throw { code: 'malformedResponse', message: 'malformedResponse' };
@@ -295,7 +296,12 @@ window.__ModuleLoader__.load({
         publish({ drafts: { ...state.drafts, [id]: makeDraft(id) }, errors: { ...state.errors, save: null, reset: null }, notice: '' });
       }
       function acceptProviders(value) {
-        publish({ providers: value.providers, providersLoaded: true });
+        const selection = value.selection && value.selection.provider && value.selection.model
+          ? { provider: value.selection.provider, model: value.selection.model } : undefined;
+        const current = state.setupOptions.proposalGenerator || { provider: '', model: '' };
+        const proposalGenerator = selection && !generatorTouched && !state.busy.recommend && !current.provider && !current.model ? selection : current;
+        publish({ providers: value.providers, providersLoaded: true,
+          ...(proposalGenerator !== current ? { setupOptions: { ...state.setupOptions, proposalGenerator } } : {}) });
       }
       function loadProviders(force = false) {
         if (!force && state.providersLoaded) return Promise.resolve({ ok: true });
@@ -440,7 +446,8 @@ window.__ModuleLoader__.load({
         cancelModelReads();
         modelReadKey = previewReadKey = undefined;
         for (const key of ['catalog', 'preview', 'runs', 'result']) { requests.get(key)?.abort(); requests.delete(key); }
-        publish({ sessionId, catalog: null, evidence: {}, setupResult: null, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, runs: null, result: null, resultChild: '', errors: {}, busy: {} });
+        generatorTouched = false;
+        publish({ sessionId, catalog: null, evidence: {}, setupResult: null, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, runs: null, result: null, resultChild: '', setupOptions: { ...state.setupOptions, proposalGenerator: { provider: '', model: '' } }, errors: {}, busy: {} });
       }
       function invalidateSetup() {
         for (const key of ['recommend', 'setupPreview']) { requests.get(key)?.abort(); requests.delete(key); }
@@ -455,6 +462,7 @@ window.__ModuleLoader__.load({
       function updateSetup(patch) {
         if (state.busy.applySetup) return;
         invalidateSetup();
+        if (Object.hasOwn(patch, 'proposalGenerator')) generatorTouched = true;
         const options = { ...state.setupOptions, ...patch };
         if (patch.defaultRoute) { options.mode = 'fixed'; options.fixed = { ...options.fixed, ...patch.defaultRoute }; }
         // Unlocking replacement never adds roles to the owner's selection.
@@ -503,14 +511,16 @@ window.__ModuleLoader__.load({
         const options = state.setupOptions;
         const catalog = state.catalog;
         invalidateSetup(); publish({ setupResult: null });
-        const strategy = options.mode === 'auto' ? options.auto : options.mode === 'fixed' ? options.fixed : { mode: 'inherit', ...(options.inheritOutputPolicy.mode === 'preserve' ? {} : { outputPolicy: options.inheritOutputPolicy }) };
+        const strategy = options.mode === 'fixed' ? options.fixed : options.mode === 'auto' && options.auto.candidates.length ? options.auto : undefined;
+        const generator = !strategy && options.proposalGenerator?.provider && options.proposalGenerator?.model
+          ? { provider: options.proposalGenerator.provider, model: options.proposalGenerator.model } : undefined;
         const browserActive = options.includeBrowser && catalog?.agents.some(agent => options.roleIds.includes(agent.id) && agent.capabilities?.some(value => value.startsWith('browser-')));
-        const payload = { roleIds: options.roleIds, strategy, scopePolicy: options.scopePolicy, includeBrowser: options.includeBrowser,
-          ...(browserActive && options.browserSeparate ? { browserStrategy: { mode: 'fixed', ...options.imageRoute } } : {}), resourceMigration: Object.fromEntries(Object.entries(options.resourceMigration).filter(([id]) => options.roleIds.includes(id))) };
+        const payload = { roleIds: options.roleIds, ...(strategy ? { strategy } : {}), ...(generator ? { generatorRoute: generator } : {}), scopePolicy: options.scopePolicy, includeBrowser: options.includeBrowser,
+          ...(options.mode === 'fixed' && browserActive && options.browserSeparate ? { browserStrategy: { mode: 'fixed', ...options.imageRoute } } : {}), resourceMigration: Object.fromEntries(Object.entries(options.resourceMigration).filter(([id]) => options.roleIds.includes(id))) };
         const answer = await request('recommend', 'recommend', { ...payload, ...sessionPayload() }, value => {
           if (options !== state.setupOptions || catalog !== state.catalog) return;
           publish({ setupProposal: value, setupSelected: Object.fromEntries(value.rows.map(row => [row.id, setupApplicable(row) && !isDirty(state.drafts[row.id])])) });
-        });
+        }, strategy ? 15000 : 120000);
         if (answer.ok && state.setupProposal === answer.value) await previewSetup();
         return answer;
       }
@@ -568,10 +578,13 @@ window.__ModuleLoader__.load({
         loadRuns: () => request('runs', 'runs', sessionPayload(), value => publish({ runs: value.runs })),
         closeResult: () => { requests.get('result')?.abort(); requests.delete('result'); publish({ result: null, resultChild: '', busy: { ...state.busy, result: false }, errors: { ...state.errors, result: null } }); },
         loadResult(childId, more = false) {
-          const previous = more && state.resultChild === childId ? state.result : null;
+          const previous = state.resultChild === childId ? state.result : null;
+          const continuation = more && previous?.nextOffset !== undefined;
           publish({ resultChild: childId, result: previous });
-          return request('result', 'result', { childId, ...sessionPayload(), offset: previous?.nextOffset ?? 0, limit: 12000 }, value => {
-            publish({ result: previous ? { ...value, rawText: previous.rawText + value.rawText } : value });
+          return request('result', 'result', { childId, ...sessionPayload(), offset: continuation ? previous.nextOffset : 0, limit: 12000,
+            ...(continuation ? { resultRevision: previous.resultRevision } : {}) }, value => {
+            if (continuation && (!previous.resultRevision || value.resultRevision !== previous.resultRevision)) throw { code: 'AGENTDECK_RESULT_CHANGED', message: 'Result revision is missing or changed. Reload the first page.' };
+            publish({ result: continuation ? { ...value, rawText: previous.rawText + value.rawText } : value });
           });
         }
       };
@@ -794,8 +807,9 @@ window.__ModuleLoader__.load({
       const eligible = agents.filter(agent => !controller.setupProtection(agent));
       const selected = proposal?.rows.filter(row => state.setupSelected[row.id] && row.applicable).length || 0;
       const pendingAcceptance = state.setupImpacts.some(impact => state.setupAccepted[impact.id] !== true);
-      const pool = options.auto;
-      const strategyIssues = options.mode === 'auto' ? formIssues({ model: pool }) : options.mode === 'fixed' ? formIssues({ model: options.fixed, reasoning: options.fixed.reasoning, ...(options.fixed.outputPolicy.mode === 'set' ? { output: { maxTokens: options.fixed.outputPolicy.maxTokens } } : {}) }) : options.inheritOutputPolicy.mode === 'set' && !validTokens(options.inheritOutputPolicy.maxTokens) ? ['output'] : [];
+      const proposalGenerator = options.proposalGenerator || { provider: '', model: '' };
+      const strategyIssues = options.mode === 'fixed' ? formIssues({ model: options.fixed, reasoning: options.fixed.reasoning, ...(options.fixed.outputPolicy.mode === 'set' ? { output: { maxTokens: options.fixed.outputPolicy.maxTokens } } : {}) }) : [];
+      const generatorMissing = options.mode !== 'fixed' && (!proposalGenerator.provider || !proposalGenerator.model);
       const picker = (route, update, chooseModel) => {
         const choices = controller.modelOptionsState(route.provider);
         const exact = controller.modelMetadataState(route.provider, route.model);
@@ -827,24 +841,19 @@ window.__ModuleLoader__.load({
         h(Field, { label: t('setupStrategy') }, h('select', { value: options.mode, disabled: busy, onChange: event => controller.updateSetup({ mode: event.target.value }) }, ['inherit', 'fixed', 'auto'].map(mode => h('option', { key: mode, value: mode }, t('setupMode.' + mode))))),
         options.mode === 'inherit' && h('p', { className: 'ad-help' }, t('setupInheritHint')),
         !proposal && h('p', { className: 'ad-help' }, t('setupScopeSummary', { selected: options.roleIds.length, protected: agents.filter(agent => controller.setupProtection(agent)).length })),
-        options.mode === 'inherit' && (options.inheritOutputPolicy.mode !== 'preserve' || agents.some(agent => options.roleIds.includes(agent.id) && agent.output)) && h('details', { className: 'ad-details', open: true }, h('summary', null, t('setupAdvanced')), outputControls(options.inheritOutputPolicy, inheritOutputPolicy => controller.updateSetup({ inheritOutputPolicy }))),
         options.mode === 'fixed' && h('fieldset', { className: 'ad-candidate', disabled: busy }, h('legend', null, t('setupMode.fixed')),
           picker(options.fixed, patch => controller.updateSetup({ fixed: { ...options.fixed, ...patch } })),
           h('details', { className: 'ad-details', open: options.fixed.outputPolicy.mode !== 'preserve' || options.fixed.reasoning.mode === 'fixed' }, h('summary', null, t('setupAdvanced')),
             effort(options.fixed.reasoning, options.fixed, reasoning => controller.updateSetup({ fixed: { ...options.fixed, reasoning } })),
             outputControls(options.fixed.outputPolicy, outputPolicy => controller.updateSetup({ fixed: { ...options.fixed, outputPolicy } })))),
-        options.mode === 'auto' && h('div', { className: 'ad-section' },
-          h('p', { className: 'ad-help' }, t('setupAutoHint')),
-          pool.candidates.map(item => h('fieldset', { key: item.id, className: 'ad-candidate', disabled: busy }, h('legend', null, item.id),
-            h(Field, { label: t('candidatePurpose') }, h('input', { value: item.purpose, maxLength: 240, required: true, onChange: event => controller.updateSetupCandidate(item.id, { purpose: event.target.value }) })),
-            picker(item, patch => controller.updateSetupCandidate(item.id, patch), model => controller.setSetupCandidateModel(item.id, model)),
-            effort(item.reasoning, item, reasoning => controller.updateSetupCandidate(item.id, { reasoning })),
-            h(Field, { label: t('maxOutput'), help: t('setupCandidateCapHint') }, h('input', { type: 'number', min: 1, max: 16777216, required: true, value: item.maxTokens, onChange: event => controller.updateSetupCandidate(item.id, { maxTokens: event.target.value === '' ? '' : Number(event.target.value) }) })),
-            h(Button, { disabled: busy || pool.candidates.length <= 1, onClick: () => controller.removeSetupCandidate(item.id) }, t('removeCandidate')))),
-          h(Button, { disabled: busy || pool.candidates.length >= 3, onClick: () => controller.addSetupCandidate() }, t('addCandidate')),
-          h(Field, { label: t('defaultCandidate') }, h('select', { value: pool.defaultCandidate, disabled: busy, required: true, onChange: event => controller.updateSetup({ auto: { ...pool, defaultCandidate: event.target.value } }) }, h('option', { value: '' }, t('setupChooseDefault')), pool.candidates.map(item => h('option', { key: item.id, value: item.id }, item.id + ' · ' + item.purpose))))),
+        options.mode !== 'fixed' && h('fieldset', { className: 'ad-candidate', disabled: busy },
+          h('legend', null, t('setupAiGenerator')),
+          options.mode === 'auto' && h('p', { className: 'ad-help' }, t('setupAutoHint')),
+          h('p', { className: 'ad-help', role: 'status' }, t('setupAiProposalHint')),
+          h('p', { className: 'ad-help' }, t('setupAiGeneratorHint')),
+          picker(proposalGenerator, patch => controller.updateSetup({ proposalGenerator: { provider: patch.provider ?? proposalGenerator.provider, model: patch.model ?? proposalGenerator.model } }))),
         h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.includeBrowser, disabled: busy, onChange: event => controller.updateSetup({ includeBrowser: event.target.checked }) }), t('setupBrowser')),
-        browserActive && h('details', { className: 'ad-details' }, h('summary', null, t('setupImageModel')),
+        options.mode === 'fixed' && browserActive && h('details', { className: 'ad-details' }, h('summary', null, t('setupImageModel')),
           h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.browserSeparate, disabled: busy, onChange: event => controller.updateSetup({ browserSeparate: event.target.checked }) }), t('setupBrowserSeparate')),
           options.browserSeparate && picker(options.imageRoute, patch => controller.updateSetup({ imageRoute: { ...options.imageRoute, ...patch } }))),
         h('details', { className: 'ad-details' }, h('summary', null, t('setupScope', { count: options.roleIds.length })),
@@ -852,11 +861,11 @@ window.__ModuleLoader__.load({
           h('p', { className: 'ad-help' }, t('setupProtectHint')),
           h(Button, { disabled: busy, onClick: () => controller.updateSetup({ roleIds: eligible.length && eligible.every(agent => options.roleIds.includes(agent.id)) ? [] : eligible.map(agent => agent.id) }) }, t('setupToggleAll')),
           h('div', { className: 'ad-fields' }, agents.map(agent => { const protectedBy = controller.setupProtection(agent); return h('label', { className: 'ad-check', key: agent.id }, h('input', { type: 'checkbox', disabled: busy || Boolean(protectedBy), checked: options.roleIds.includes(agent.id), onChange: event => controller.updateSetup({ roleIds: event.target.checked ? [...options.roleIds, agent.id] : options.roleIds.filter(id => id !== agent.id) }) }), locale.resolveText(agent.title), protectedBy && h('span', { className: 'ad-help' }, ' · ' + t(protectedBy))); }))),
-        agents.filter(agent => options.roleIds.includes(agent.id) && agent.model.mode === 'auto' && (options.mode !== 'auto' || browserActive && options.browserSeparate && agent.capabilities.some(value => value.startsWith('browser-')))).map(agent => h(Field, { key: agent.id, label: t('setupMigration', { role: locale.resolveText(agent.title) }), help: t('setupMigrationHint') }, h('select', { value: options.resourceMigration[agent.id]?.mode === 'candidate' ? options.resourceMigration[agent.id].candidateId : options.resourceMigration[agent.id]?.mode === 'reset' ? '@reset' : '', disabled: busy, onChange: event => controller.updateSetup({ resourceMigration: { ...options.resourceMigration, [agent.id]: event.target.value === '@reset' ? { mode: 'reset' } : { mode: 'candidate', candidateId: event.target.value } } }) }, h('option', { value: '' }, t('setupMigrationRequired')), h('option', { value: '@reset' }, t('setupMigrationReset')), agent.model.candidates.map(item => h('option', { key: item.id, value: item.id }, item.id + ' · ' + item.maxTokens))))),
+        agents.filter(agent => options.roleIds.includes(agent.id) && agent.model.mode === 'auto' && options.mode === 'fixed' && (options.includeBrowser || !agent.capabilities.some(value => value.startsWith('browser-')))).map(agent => h(Field, { key: agent.id, label: t('setupMigration', { role: locale.resolveText(agent.title) }), help: t('setupMigrationHint') }, h('select', { value: options.resourceMigration[agent.id]?.mode === 'candidate' ? options.resourceMigration[agent.id].candidateId : options.resourceMigration[agent.id]?.mode === 'reset' ? '@reset' : '', disabled: busy, onChange: event => controller.updateSetup({ resourceMigration: { ...options.resourceMigration, [agent.id]: event.target.value === '@reset' ? { mode: 'reset' } : { mode: 'candidate', candidateId: event.target.value } } }) }, h('option', { value: '' }, t('setupMigrationRequired')), h('option', { value: '@reset' }, t('setupMigrationReset')), agent.model.candidates.map(item => h('option', { key: item.id, value: item.id }, item.id + ' · ' + item.maxTokens))))),
         h('p', { className: 'ad-help' }, t('setupLimit')),
         h(ErrorNotice, { value: state.errors.providers, t, retry: () => controller.loadProviders(true) }), h(ErrorNotice, { value: state.errors.recommend, t }),
         strategyIssues.length > 0 && h('p', { className: 'ad-warning' }, t('setupInputsIncomplete')),
-        h(Button, { primary: true, disabled: busy || state.busy.recommend || !options.roleIds.length || strategyIssues.length > 0 || browserActive && options.browserSeparate && (!options.imageRoute.provider || !options.imageRoute.model), onClick: () => controller.recommendSetup() }, t(state.busy.recommend ? 'loading' : 'setupGenerate')),
+        h(Button, { primary: true, disabled: busy || state.busy.recommend || !options.roleIds.length || strategyIssues.length > 0 || generatorMissing || (options.mode === 'fixed' && browserActive && options.browserSeparate && (!options.imageRoute.provider || !options.imageRoute.model)), onClick: () => controller.recommendSetup() }, t(state.busy.recommend ? 'loading' : 'setupGenerate')),
         proposal && h('div', { className: 'ad-section' },
           h('h4', null, t('setupReview')), h('p', { className: 'ad-help', role: 'status' }, t('setupReviewSummary', { changed: selected, unchanged: proposal.rows.filter(row => row.status === 'unchanged').length, preserved: proposal.rows.filter(row => row.status === 'preserved').length, blocked: proposal.rows.filter(row => row.status === 'blocked').length, indirect: state.setupPreviewReady ? state.setupImpacts.length : t('setupPreviewPending') })),
           h('p', { className: 'ad-help' }, t('setupInheritance')), h(DiagnosticList, { items: proposal.diagnostics, t }),
@@ -905,7 +914,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ad-run-actions' }, run.childId ? h(Button, { onClick: () => controller.loadResult(run.childId), disabled: state.busy.result && state.resultChild === run.childId }, t('results')) : h('span', { className: 'ad-help' }, t('noChild'))),
           state.resultChild === run.childId && h('section', { className: 'ad-result', 'aria-label': t('result'), 'aria-busy': Boolean(state.busy.result) },
             h('div', { className: 'ad-detail-head' }, h('h3', null, t('result')), h(Button, { onClick: () => controller.closeResult() }, t('closeResult'))),
-            h(ErrorNotice, { value: state.errors.result, t }),
+            h(ErrorNotice, { value: state.errors.result, t, retry: () => controller.loadResult(run.childId) }),
             state.busy.result && h('p', { role: 'status' }, t('loading')),
             state.result && h(React.Fragment, null,
               h(Stats, { rows: [[t('nativeStatus'), enumText(state.result.status, t)], [t('child'), state.result.childId], [t('parent'), run.parentId]] }),

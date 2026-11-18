@@ -58,7 +58,7 @@ export function setupStrategyRoutes(strategy: JsonObject): { provider: string; m
 /** Propose declarations only: authorization and plugin availability remain native runtime checks. */
 export function recommendStrategyRole(role: AgentDefinition, override: OverrideRecord | undefined, strategy: JsonObject, models: JsonObject[], options: {
   externalSource?: string; includeBrowser: boolean; capabilitiesMissing: boolean; parent?: JsonObject;
-  scopePolicy: 'fill-unconfigured' | 'replace-selected'; resourceMigration?: JsonObject;
+  scopePolicy: 'fill-unconfigured' | 'replace-selected'; resourceMigration?: JsonObject; strategySource?: 'owner' | 'ai';
 }): JsonObject {
   const parsed = normalizeSetupStrategy(strategy);
   if (!['fill-unconfigured', 'replace-selected'].includes(options.scopePolicy)) throw new Error('Invalid setup scopePolicy');
@@ -159,7 +159,9 @@ export function recommendStrategyRole(role: AgentDefinition, override: OverrideR
   else if (output && (parsed.outputPolicy?.mode === 'set' || role.model.mode === 'auto')) doc.set('output', output);
   if (JSON.stringify(proposed.context) !== JSON.stringify(role.context)) doc.set('context', proposed.context);
   const proposedText = doc.toString(); parseOverrideText(proposedText);
-  reasons.push(setupDiagnostic('setup.strategySelected', 'Use the owner-selected strategy without ranking or discovering models.'));
+  reasons.push(options.strategySource === 'ai'
+    ? setupDiagnostic('setup.strategyGenerated', 'Use the AI-generated strategy after local validation.')
+    : setupDiagnostic('setup.strategySelected', 'Use the owner-selected strategy without ranking or discovering models.'));
   return { ...row, status: 'changed', applicable: true, after: setupResources(proposed), proposedText };
 }
 

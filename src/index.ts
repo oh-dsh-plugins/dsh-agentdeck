@@ -4,6 +4,7 @@ import { HostConnectionService, type HostConnectionRpc } from '@deepseek-ai/dsh-
 import { loadBuiltinAgents } from './core/index.js';
 import { AgentDeckStore } from './host/store.js';
 import { AgentDeckController } from './host/controller.js';
+import { ResultRevisionError } from './host/results.js';
 import { object, requiredString, optionalString, messageOf, jsonClone } from './host/types.js';
 import type { HostContext, RuntimeAgent, JsonObject } from './host/types.js';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
@@ -26,14 +27,13 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
 
   const read = defineTool({
     name: 'scene_agent_catalog',
-    description: 'Discover ready-to-use AgentDeck scene agents, their actual model options, effective budgets and task records. Use general when no specialist fits. Availability includes the saved default route authorization for this Session; unknown is not approval. Read details only when needed; simple known-file work can use tools directly. Use candidates for the selected auto role to read its compact pool and revision. Configuration saving/resetting cannot alter model candidates or resource policy; those are owner-managed.',
+    description: 'Discover ready-to-use AgentDeck scene agents, their actual model options, effective budgets and task records. Use general when no specialist fits. Availability includes the saved default route authorization for this Session; unknown is not approval. Read details only when needed; simple known-file work can use tools directly. Use candidates for the selected auto role to read its compact pool and revision. Role configuration is read-only through this tool. Use the owner management page to save or reset.',
     parameters: {
       action: { type: 'string', enum: ['list', 'get', 'models', 'preview', 'candidates', 'runs', 'save', 'reset'] },
       id: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' },
-      text: { type: 'string' }, expectedRevision: { type: 'string' },
       candidateId: { type: 'string' }, revision: { type: 'string' },
     }, output,
-    isConcurrencySafe: (args: any) => !['save', 'reset'].includes(args.action),
+    isConcurrencySafe: () => true,
     async execute(input: any, exec: ToolRunContext) {
       const args = object(input);
       const actor = exec.agent as RuntimeAgent | undefined;
@@ -58,8 +58,8 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
         case 'preview': result = await controller.preview(requiredString(args.id, 'id'), actor, exec.signal, args); break;
         case 'candidates': result = await controller.candidates(requiredString(args.id, 'id'), actor, exec.signal); break;
         case 'runs': result = await controller.runs(actor, exec.signal); break;
-        case 'save': result = await controller.save(args, actor, true); break;
-        case 'reset': result = await controller.reset(args, actor, true); break;
+        case 'save':
+        case 'reset': throw new Error('AGENTDECK_OWNER_CONFIGURATION_REQUIRED: Save or reset roles on the owner management page.');
         default: throw new Error('Unknown catalog action.');
       }
       return jsonClone(result);
@@ -91,8 +91,8 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
   });
   const result = defineTool({
     name: 'scene_agent_result',
-    description: 'Read evidence and paged final output of your AgentDeck child when the native completion notice is insufficient. Inspect status and coverage before accepting success. This read does not resume or repeat the task.',
-    parameters: { childId: { type: 'string', required: true }, offset: { type: 'number' }, limit: { type: 'number' } },
+    description: 'Read evidence and paged final output of your AgentDeck child when the native completion notice is insufficient. To continue, pass nextOffset as offset and include resultRevision from the first page. Reload the first page if the result changes. Inspect status and coverage before accepting success. This read does not resume or repeat the task.',
+    parameters: { childId: { type: 'string', required: true }, offset: { type: 'number' }, limit: { type: 'number' }, resultRevision: { type: 'string' } },
     output, isConcurrencySafe: () => true,
     async execute(args: any, exec: ToolRunContext) {
       if (!exec.agent) throw new Error('Result access requires a real parent Agent.');
@@ -108,7 +108,7 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
       'Choose general (the default) for unmatched or ambiguous tasks. Unknown ids and disabled roles are errors, not implicit fallback. Explicit user role choice must not silently change. Discover actual model ids/efforts before overriding them.',
       'Starts return a child Session id. Native completion is delivered automatically; do not poll. Use scene_agent_control for these children, not Agent Teams target-name controls. On failures preserve completed work and scope; policy refusal must not trigger another route. Uncertain startup must be reconciled before creating another task.',
       `Factory roles: ${loadBuiltinAgents().map(agent => `${agent.id}: ${agent.description.en}`).join('; ')}`,
-      'User/project extensions and current Session availability are in scene_agent_catalog. Check default-route authorization before dispatch. A denied default requires owner action; do not silently switch models or roles. Unknown authorization is not approval. For an auto role read only its compact candidates, choose from that pool using task scope, and pass candidateId plus revision; otherwise its default is used. Do not load all pools or run a classifier. Candidate/resource edits belong to the owner UI. Read result detail only when the completion notice is insufficient. Do not claim efficiency improvements without measurement.',
+      'User/project extensions and current Session availability are in scene_agent_catalog. Check default-route authorization before dispatch. A denied default requires owner action; do not silently switch models or roles. Unknown authorization is not approval. For an auto role read only its compact candidates, choose from that pool using task scope, and pass candidateId plus revision; otherwise its default is used. Do not load all pools or run a classifier. Role configuration writes belong to the owner UI. Read result detail only when the completion notice is insufficient. Do not claim efficiency improvements without measurement.',
     ].join('\n'),
   }), 'AgentDeck main-agent guidance');
 
@@ -130,7 +130,7 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
         if (sessionId && !actor) throw new Error('The selected Session is not live. Select a current Session to resolve inherited settings.');
         const value = await controller.operation(endpoint.slice('agentdeck.'.length), args, actor, signal);
         return { ok: true, value: jsonClone(value) };
-      } catch (error) { return { ok: false, error: { code: 'AGENTDECK_OPERATION_FAILED', message: messageOf(error), details: {} } }; }
+      } catch (error) { return { ok: false, error: { code: error instanceof ResultRevisionError ? 'AGENTDECK_RESULT_CHANGED' : 'AGENTDECK_OPERATION_FAILED', message: messageOf(error), details: {} } }; }
     }), 'AgentDeck owner RPC');
   });
 }

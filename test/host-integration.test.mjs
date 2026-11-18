@@ -88,7 +88,7 @@ async function fixture({ holdChild = false, subprocess = true, allowNativeFallba
 }
 const text = result => result.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
 function success(result) { assert.equal(result.isError, false, text(result)); return result.value; }
-// Seed task-owned owner configuration; model-facing save must reject resource edits.
+// Seed task-owned configuration for native behavior tests without mounting the owner RPC.
 const ownerSave = (f, id, text) => f.domain().table('overrides').put(id, { id, text, revision: textRevision(text), updatedAt: Date.now() });
 const start = (f, fields = {}, options) => f.call('scene_agent_start', {
   role: 'reader', prompt: 'Read only the authorized fixture evidence and report what was verified.', ...fields,
@@ -145,6 +145,13 @@ test('actual Host entry, JSON domain and native preset start one guarded child w
     assert.equal(result.nativeStop.kind, 'completed');
     assert.equal(result.rawText, CHILD_TEXT);
     assert.ok(result.limitations.length > 0, 'plain output must not become a validated completion report');
+    const first = success(await f.call('scene_agent_result', { childId: child.id, limit: 4 }));
+    const offset = first.nextOffset;
+    const missing = await f.call('scene_agent_result', { childId: child.id, offset });
+    assert.equal(missing.isError, true);
+    assert.match(text(missing), /revision.*first page/i);
+    const second = success(await f.call('scene_agent_result', { childId: child.id, offset, resultRevision: first.resultRevision }));
+    assert.equal(first.rawText + second.rawText, result.rawText);
   } finally { await f.close(); }
 });
 
@@ -293,6 +300,24 @@ test('native capacity exhaustion through the Host does not duplicate an uncertai
   } finally { await f.close(); }
 });
 
+test('legacy model configuration actions return owner migration guidance without writing', async () => {
+  const f = await fixture();
+  try {
+    const original = 'schemaVersion: 1\nid: reader\ninstructions: Owner instructions.\n';
+    await ownerSave(f, 'reader', original);
+    const before = f.domain().table('overrides').get('reader');
+    for (const args of [
+      { action: 'save', id: 'reader', expectedRevision: before.revision, text: original.replace('Owner', 'Model') },
+      { action: 'reset', id: 'reader', expectedRevision: before.revision },
+    ]) {
+      const result = await f.call('scene_agent_catalog', args);
+      assert.equal(result.isError, true);
+      assert.match(text(result), /AGENTDECK_OWNER_CONFIGURATION_REQUIRED/);
+      assert.deepEqual(f.domain().table('overrides').get('reader'), before);
+    }
+  } finally { await f.close(); }
+});
+
 test('JSON-backed snapshot survives Host reload and cold child continuation with the original role and maxTokens', async () => {
   const f = await fixture({ holdChild: true });
   try {
@@ -309,7 +334,7 @@ test('JSON-backed snapshot survives Host reload and cold child continuation with
     const activation = f.h.activationFor(child.id);
     await bounded(activation.dispose(), 'release exact snapshot fixture activation');
     assert.equal(f.ctx.agents.get(child.id), undefined);
-    success(await f.call('scene_agent_catalog', { action: 'save', id: 'reader', text: 'schemaVersion: 1\nid: reader\ninstructions: New revision sentinel must affect only future tasks.\n' }));
+    await ownerSave(f, 'reader', 'schemaVersion: 1\nid: reader\ninstructions: New revision sentinel must affect only future tasks.\n');
     f.h.parent.options.maxTokens = 3072;
     await f.reloadHost();
     assert.equal(f.domain().table('snapshots').get(run.revision).model.maxTokens, 1536);
@@ -425,10 +450,7 @@ test('required custom skills reject missing dependencies before start and retain
   const f = await fixture({ holdChild: true });
   let unregister;
   try {
-    const missing = success(await f.call('scene_agent_catalog', {
-      action: 'save', id: 'reader',
-      text: 'schemaVersion: 1\nid: reader\nskills: [task-handoff, fixture-required-missing]\n',
-    }));
+    await ownerSave(f, 'reader', 'schemaVersion: 1\nid: reader\nskills: [task-handoff, fixture-required-missing]\n');
     const refused = await start(f);
     assert.equal(refused.isError, true);
     assert.match(text(refused), /Required role skill is unavailable: fixture-required-missing/);
@@ -441,10 +463,7 @@ test('required custom skills reject missing dependencies before start and retain
     const originalBody = 'Read the anchored fixture source completely. Preserve this original custom skill revision.';
     const originalBase = { kind: 'directory', path: f.h.storageRoot };
     unregister = nativeSkills.register({ name: id, description: 'Custom native fixture skill.', content: originalBody, source: 'runtime', resourceBase: originalBase });
-    success(await f.call('scene_agent_catalog', {
-      action: 'save', id: 'reader', expectedRevision: missing.revision,
-      text: `schemaVersion: 1\nid: reader\nskills: [task-handoff, ${id}]\n`,
-    }));
+    await ownerSave(f, 'reader', `schemaVersion: 1\nid: reader\nskills: [task-handoff, ${id}]\n`);
     const run = success(await start(f));
     const child = f.ctx.agents.get(run.childId);
     assert.ok(child);

@@ -52,36 +52,49 @@ export function modelView(info: JsonObject, authorized: boolean | null): JsonObj
   return { provider: info.provider, id: info.id, name: info.name ?? info.id, authorized, metadataResolved: true, ...(info.context?.contextWindow ? { contextWindow: info.context.contextWindow } : {}), ...(info.defaultMaxTokens ? { defaultMaxTokens: info.defaultMaxTokens } : {}), efforts: info.reasoning?.efforts ?? [], ...(info.reasoning?.defaultEffort ? { defaultEffort: info.reasoning.defaultEffort } : {}), ...(info.inputModalities ? { inputModalities: info.inputModalities } : {}) };
 }
 
-export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, query?: { provider: string; model?: string }, signal?: AbortSignal, optionsOnly = false): Promise<JsonObject> {
+export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, query?: { provider: string; model?: string }, signal?: AbortSignal, optionsOnly = false, authorizedRoutesOnly = false, routeSnapshot?: { routes: Awaited<ReturnType<typeof sessionRoutes>> }): Promise<JsonObject> {
   const llm = ctx.get('llm') as any;
   if (!llm) return { providers: [], models: [], policy: agent ? 'parent-only' : 'not-selected', diagnostics: ['Native llm service is unavailable.'] };
   const providers = llm.listProviders();
   const selection = currentSelection(agent);
   const inheritance = delegationSelection(agent);
   if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), policy: agent ? 'unresolved' : 'not-selected', diagnostics: [] };
-  const routes = await sessionRoutes(ctx, agent, signal);
+  const routes = routeSnapshot ? routeSnapshot.routes : await sessionRoutes(ctx, agent, signal);
   const allowed = (provider: string, model: string) => !agent ? null : routes ? routes.some(route => route.provider === provider && route.model === model) : inheritance?.provider === provider && inheritance.model === model;
   const diagnostics: string[] = [];
   const rows = new Map<string, any>();
   const exact = query?.model ? { provider: query.provider, model: query.model } : undefined;
-  if (!exact) await Promise.all(providers.filter((provider: any) => !query || provider.id === query.provider).map(async (provider: any) => {
+  if (!exact && !authorizedRoutesOnly) await Promise.all(providers.filter((provider: any) => !query || provider.id === query.provider).map(async (provider: any) => {
     try {
       for (const entry of await llm.listModels(provider.id)) rows.set(`${provider.id}\0${entry.id}`, entry);
     } catch (error) { diagnostics.push(`${provider.id}: ${messageOf(error)}`); }
   }));
-  for (const route of exact ? [exact] : [...(routes ?? []), ...(selection ? [{ provider: selection.provider, model: selection.model }] : []), ...(inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : [])].filter(route => !query || route.provider === query.provider)) {
+  const routeRows = authorizedRoutesOnly
+    ? (routes ?? (inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : []))
+    : [...(routes ?? []), ...(selection ? [{ provider: selection.provider, model: selection.model }] : []), ...(inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : [])];
+  for (const route of exact ? [exact] : routeRows.filter(route => !query || route.provider === query.provider)) {
     const key = `${route.provider}\0${route.model}`;
     if (!rows.has(key)) rows.set(key, { provider: route.provider, id: route.model, name: route.model });
   }
-  const models = await Promise.all([...rows.values()].map(async entry => {
-    const provider = entry.provider;
-    const base = { provider, id: entry.id, name: entry.name ?? entry.id, authorized: allowed(provider, entry.id) };
-    if (optionsOnly && !exact) return { ...base, metadataResolved: false };
-    try {
-      const info = await llm.resolveModelInfo(provider, entry.id, signal);
-      return modelView(info, base.authorized);
-    } catch (error) { signal?.throwIfAborted(); return { ...base, metadataResolved: false, error: messageOf(error) }; }
-  }));
+  const entries = [...rows.values()];
+  const models = new Array<JsonObject>(entries.length);
+  let cursor = 0;
+  const resolveOne = async () => {
+    while (true) {
+      signal?.throwIfAborted();
+      const index = cursor++;
+      if (index >= entries.length) return;
+      const entry = entries[index];
+      const provider = entry.provider;
+      const base = { provider, id: entry.id, name: entry.name ?? entry.id, authorized: allowed(provider, entry.id) };
+      if (optionsOnly && !exact) { models[index] = { ...base, metadataResolved: false }; continue; }
+      try {
+        const info = await llm.resolveModelInfo(provider, entry.id, signal);
+        models[index] = modelView(info, base.authorized);
+      } catch (error) { signal?.throwIfAborted(); models[index] = { ...base, metadataResolved: false, error: messageOf(error) }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, entries.length) }, resolveOne));
   signal?.throwIfAborted();
   return { providers, models, ...(selection ? { selection } : {}), policy: !agent ? 'not-selected' : routes ? 'session' : 'parent-only', diagnostics };
 }

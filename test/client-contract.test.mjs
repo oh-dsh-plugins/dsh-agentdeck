@@ -348,15 +348,34 @@ test('later fixed-model selection stays current while independent earlier metada
 test('result paging uses nextOffset and does not fabricate completion from idle', async () => {
   const { controller, calls } = harness(call => ok({
     childId: call.payload.childId, status: 'idle', summary: '', rawText: call.payload.offset ? 'second' : 'first',
-    totalCharacters: 11, ...(call.payload.offset ? {} : { nextOffset: 5 }), limitations: ['Outcome not declared'],
+    totalCharacters: 11, resultRevision: 'revision-one', ...(call.payload.offset ? {} : { nextOffset: 5 }), limitations: ['Outcome not declared'],
   }));
   await controller.loadResult('child-a');
   assert.equal(controller.getSnapshot().result.status, 'idle');
   await controller.loadResult('child-a', true);
   assert.equal(controller.getSnapshot().result.rawText, 'firstsecond');
   assert.equal(calls[1].payload.offset, 5);
+  assert.equal(calls[1].payload.resultRevision, 'revision-one');
   assert.equal(controller.getSnapshot().result.nextOffset, undefined);
   controller.dispose();
+});
+
+test('a stale result page preserves loaded text and a first-page reload replaces it', async () => {
+  let revision = 'old';
+  const { controller } = harness(call => ok({
+    childId: 'child-a', status: 'running', rawText: revision, resultRevision: revision,
+    totalCharacters: 10, nextOffset: call.payload.offset ? undefined : revision.length,
+  }));
+  try {
+    await controller.loadResult('child-a');
+    revision = 'new';
+    const stale = await controller.loadResult('child-a', true);
+    assert.equal(stale.error.code, 'AGENTDECK_RESULT_CHANGED');
+    assert.equal(controller.getSnapshot().result.rawText, 'old');
+    await controller.loadResult('child-a');
+    assert.equal(controller.getSnapshot().result.rawText, 'new');
+    assert.equal(controller.getSnapshot().errors.result, null);
+  } finally { controller.dispose(); }
 });
 
 test('unmount aborts every pending operation and ignores late async answers', async () => {

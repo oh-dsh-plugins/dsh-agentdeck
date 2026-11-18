@@ -29,8 +29,9 @@ const autoPatch = (extra = {}) => ({ model: { mode: 'auto', candidates: pool(), 
 // service fixtures; no provider request, tool execution or child dispatch occurs.
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'agentdeck-selection-v2-'));
-  const calls = { providers: 0, directory: [], metadata: [], config: [], observations: 0, disposed: 0 };
+  const calls = { providers: 0, directory: [], metadata: [], config: [], stream: [], observations: 0, disposed: 0 };
   let root, store, controller;
+  let aiOutput = JSON.stringify({ strategies: { reader: { mode: 'auto', candidates: [pool()[0]], defaultCandidate: 'fast' } } });
   const actor = { id: 'parent', options: { ...parent }, model: { current: () => ({ provider: 'p', model: 'm' }) },
     session: { header: { cwd: directory }, requestHeader: () => undefined } };
   async function activate() {
@@ -57,12 +58,21 @@ async function fixture() {
           reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } };
       },
       resolveCallConfig: async config => { calls.config.push({ ...config }); return { ...config, maxTokens: config.maxTokens ?? 4000 }; },
+      stream: async options => {
+        calls.stream.push({ ...options });
+        const output = aiOutput;
+        return (async function* () {
+          yield { type: 'text-delta', index: 0, text: output };
+          yield { type: 'finish', reason: { kind: 'stop' } };
+        })();
+      },
     });
     controller = new AgentDeckController(root, store);
   }
   await activate();
   return { actor, calls, directory,
     get root() { return root; }, get store() { return store; }, get controller() { return controller; },
+    setAiOutput(value) { aiOutput = typeof value === 'string' ? value : JSON.stringify(value); },
     allow(routes) {
       root.provide('sessionQuery', { observeSession: async id => {
         assert.equal(id, actor.id);
@@ -184,6 +194,281 @@ test('role output overrides Session output and no-Session estimates disclose the
 const strategyRequest = (strategy, extra = {}) => ({ roleIds: ['reader'], strategy, scopePolicy: 'fill-unconfigured', includeBrowser: false, ...extra });
 const strategyPayload = (proposal, scopePolicy = 'fill-unconfigured') => ({ ...payload(proposal), setupPolicy: { scopePolicy } });
 
+test('AI setup proposes from the active Session model and reuses preview/apply validation', async () => {
+ const f = await fixture(); try {
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'], includeBrowser: false }, f.actor);
+  assert.equal(proposal.proposalSource, 'ai');
+  assert.deepEqual(proposal.proposalGenerator, { provider: 'p', model: 'm' });
+  assert.equal(f.calls.stream.length, 1);
+  const streamRequest = f.calls.stream[0];
+  assert.equal(streamRequest.provider, 'p'); assert.equal(streamRequest.model, 'm');
+  assert.equal(streamRequest.maxTokens, 1200); assert.ok(streamRequest.signal);
+  const prompt = JSON.parse(streamRequest.messages[0].content);
+  assert.equal(prompt.roles[0].id, 'reader');
+  assert.deepEqual(prompt.constraints.allowedModels.map(model => [model.provider, model.model]), [['p', 'm']]);
+  assert.equal(proposal.rows[0].applicable, true);
+  assert.equal(proposal.rows[0].after.model.mode, 'auto');
+  const request = strategyPayload(proposal);
+  const preview = await f.controller.operation('previewSetup', request, f.actor);
+  assert.deepEqual(preview.resources.reader.model, proposal.rows[0].after.model);
+  const applied = await f.controller.operation('applySetup', { ...request, impactRevision: preview.impactRevision, acceptedIndirectRoles: [] }, f.actor);
+  assert.equal(applied.status, 'completed');
+  assert.equal(f.store.getOverride('reader').text, proposal.rows[0].proposedText);
+ } finally { await f.close(); }
+});
+
+test('AI setup validates request options before querying models or generating', async () => {
+ const f = await fixture(); try {
+  const request = { roleIds: ['reader'] };
+  await assert.rejects(f.controller.operation('recommend', { ...request, scopePolicy: 'invalid' }, f.actor), /scope policy/);
+  await assert.rejects(f.controller.operation('recommend', { ...request, resourceMigration: { general: { mode: 'reset' } } }, f.actor), /must name a selected role/);
+  assert.deepEqual(f.calls.metadata, []);
+  assert.equal(f.calls.stream.length, 0);
+ } finally { await f.close(); }
+});
+
+test('AI setup skips generation and metadata for protected roles', async () => {
+ const f = await fixture(); try {
+  await f.controller.save({ id: 'reader', text: definition({ instructions: 'Keep my settings.' }) });
+  const preserved = await f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor);
+  assert.equal(preserved.rows[0].status, 'preserved');
+  assert.deepEqual(f.calls.metadata, []);
+  assert.equal(f.calls.stream.length, 0);
+  f.setAiOutput({ strategies: { general: { mode: 'auto', candidates: [pool()[0]], defaultCandidate: 'fast' } } });
+  const mixed = await f.controller.operation('recommend', { roleIds: ['reader', 'general'] }, f.actor);
+  assert.equal(mixed.rows[0].status, 'preserved');
+  assert.equal(mixed.rows[1].applicable, true);
+  assert.deepEqual(JSON.parse(f.calls.stream[0].messages[0].content).roles.map(role => role.id), ['general']);
+ } finally { await f.close(); }
+});
+
+test('AI setup closes an active generator when a chunk arrives after cancellation', async () => {
+ const f = await fixture(); try {
+  const abort = new AbortController();
+  let pulledAgain = false;
+  let closed = false;
+  f.root.get('llm').stream = async () => (async function* () {
+   try {
+    abort.abort();
+    yield { type: 'text-delta', text: '{' };
+    pulledAgain = true;
+   } finally { closed = true; }
+  })();
+  await assert.rejects(f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor, abort.signal), { name: 'AbortError' });
+  assert.equal(pulledAgain, false);
+  assert.equal(closed, true);
+ } finally { await f.close(); }
+});
+
+test('AI setup bounds accumulated response bytes and closes the stream', async () => {
+ const f = await fixture(); try {
+  let pulledAgain = false;
+  let closed = false;
+  f.root.get('llm').stream = async () => (async function* () {
+   try {
+    yield { type: 'text-delta', text: '界'.repeat(50_000) };
+    yield { type: 'text-delta', text: '界'.repeat(50_000) };
+    pulledAgain = true;
+   } finally { closed = true; }
+  })();
+  await assert.rejects(f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor), /response is too large/);
+  assert.equal(pulledAgain, false);
+  assert.equal(closed, true);
+ } finally { await f.close(); }
+});
+
+test('AI setup surfaces partial metadata failures without offering failed routes', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'q', model: 'missing' }]);
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor);
+  assert.equal(proposal.rows[0].applicable, true);
+  assert.deepEqual(JSON.parse(f.calls.stream[0].messages[0].content).constraints.allowedModels.map(model => model.model), ['m']);
+  assert.deepEqual(proposal.diagnostics.map(({ code, params, original }) => ({ code, params, original })), [
+   { code: 'setup.metadataFailed', params: { provider: 'q', model: 'missing' }, original: 'Unavailable declaration' },
+  ]);
+ } finally { await f.close(); }
+});
+
+test('AI setup rejects an oversized prompt before starting the model stream', async () => {
+ const f = await fixture(); try {
+  await f.controller.save({ id: 'reader', text: definition({ instructions: '界'.repeat(100_000) }) });
+  await assert.rejects(f.controller.operation('recommend', { roleIds: ['reader'], scopePolicy: 'replace-selected' }, f.actor), /prompt is too large/);
+  assert.equal(f.calls.stream.length, 0);
+ } finally { await f.close(); }
+});
+
+test('AI setup reuses one Session route observation across directory reads', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'p', model: 'model-1' }, { provider: 'p', model: 'model-2' }]);
+  await f.controller.operation('recommend', { roleIds: ['reader'], generatorRoute: { provider: 'p', model: 'm' } }, f.actor);
+  assert.ok(f.calls.observations <= 1, 'Session policy was observed repeatedly: ' + f.calls.observations);
+ } finally { await f.close(); }
+});
+
+test('AI setup bounds concurrent metadata resolution across allowed routes', async () => {
+ const f = await fixture(); try {
+  const routes = Array.from({ length: 20 }, (_, i) => ({ provider: 'p', model: 'model-' + i }));
+  f.allow([{ provider: 'p', model: 'm' }, ...routes]);
+  let active = 0; let peak = 0;
+  f.root.get('llm').resolveModelInfo = async (provider, model) => { active++; peak = Math.max(peak, active); await new Promise(resolve => setTimeout(resolve, 2)); active--; return { provider, id: model, name: model, context: { contextWindow: 32768 }, defaultMaxTokens: 4000, inputModalities: ['text'], reasoning: { efforts: [] } }; };
+  await f.controller.operation('recommend', { roleIds: ['reader'], generatorRoute: routes[0] }, f.actor);
+  assert.ok(peak <= 8, 'metadata resolution exceeded the concurrency budget: ' + peak);
+ } finally { await f.close(); }
+});
+
+test('AI setup resolves only native allowed routes without enumerating provider catalogs', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'q', model: 'large' }]);
+  f.root.get('llm').listModels = async () => { throw new Error('AI setup must not enumerate provider catalogs'); };
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'], includeBrowser: false }, f.actor);
+  assert.deepEqual(f.calls.directory, []);
+  assert.deepEqual([...new Map(f.calls.metadata.map(route => [route.join('\0'), route])).values()], [['p', 'm'], ['q', 'large']]);
+  const prompt = JSON.parse(f.calls.stream[0].messages[0].content);
+  assert.deepEqual(prompt.constraints.allowedModels.map(model => [model.provider, model.model]), [['p', 'm'], ['q', 'large']]);
+  assert.equal(proposal.proposalSource, 'ai');
+ } finally { await f.close(); }
+});
+
+test('AI setup accepts an explicitly selected authorized generator route', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'q', model: 'large' }]);
+  f.setAiOutput({ strategies: { reader: { mode: 'auto', candidates: [{ id: 'selected', purpose: 'Use the selected route.', provider: 'q', model: 'large', reasoning: { mode: 'model-default' }, maxTokens: 6000 }], defaultCandidate: 'selected' } } });
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'], includeBrowser: false, generatorRoute: { provider: 'q', model: 'large' } }, f.actor);
+  assert.equal(proposal.proposalSource, 'ai');
+  assert.deepEqual(proposal.proposalGenerator, { provider: 'q', model: 'large' });
+  assert.equal(f.calls.stream[0].provider, 'q'); assert.equal(f.calls.stream[0].model, 'large');
+  const prompt = JSON.parse(f.calls.stream[0].messages[0].content);
+  assert.deepEqual(prompt.constraints.proposalGenerator, { provider: 'q', model: 'large' });
+  assert.equal(proposal.rows[0].after.model.candidates[0].provider, 'q');
+ } finally { await f.close(); }
+});
+
+test('one AI request proposes independent role strategies and enforces exact role coverage', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'q', model: 'large' }]);
+  const strategy = candidate => ({ mode: 'auto', candidates: [candidate], defaultCandidate: candidate.id });
+  const [fast, deep] = pool();
+  const request = { roleIds: ['reader', 'general'], includeBrowser: false };
+  f.setAiOutput({ strategies: { reader: strategy(fast), general: strategy(deep) } });
+  const proposal = await f.controller.operation('recommend', request, f.actor);
+  assert.equal(f.calls.stream.length, 1);
+  assert.equal(f.calls.stream[0].maxTokens, 2400);
+  assert.deepEqual(proposal.rows.map(row => [row.id, row.after.model.defaultCandidate]), [['reader', 'fast'], ['general', 'deep']]);
+  const preview = await f.controller.operation('previewSetup', strategyPayload(proposal), f.actor);
+  assert.equal(preview.resources.reader.model.defaultCandidate, 'fast');
+  assert.equal(preview.resources.general.model.defaultCandidate, 'deep');
+  f.setAiOutput({ strategies: { reader: strategy(fast) } });
+  await assert.rejects(f.controller.operation('recommend', request, f.actor), /missing a strategy for general/);
+  f.setAiOutput({ strategies: { reader: strategy(fast), general: strategy(deep), outside: strategy(fast) } });
+  await assert.rejects(f.controller.operation('recommend', request, f.actor), /strategy for an unselected role/);
+  assert.equal(f.store.getOverride('reader'), undefined);
+ } finally { await f.close(); }
+});
+
+test('AI setup rejects a proposal when a role changes during generation', async () => {
+ const f = await fixture(); try {
+  const llm = f.root.get('llm');
+  const stream = llm.stream;
+  llm.stream = async options => {
+   await f.controller.save({ id: 'reader', text: definition({ instructions: 'Read the updated sources.' }) });
+   return stream(options);
+  };
+  await assert.rejects(f.controller.operation('recommend', { roleIds: ['reader'], scopePolicy: 'replace-selected' }, f.actor), /Selected roles changed during AI setup/);
+  assert.match(f.store.getOverride('reader').text, /Read the updated sources/);
+ } finally { await f.close(); }
+});
+
+test('cancelled metadata workers do not start queued routes', async () => {
+ const f = await fixture(); try {
+  const controller = new AbortController();
+  f.allow(Array.from({ length: 20 }, (_, i) => ({ provider: 'p', model: 'model-' + i })));
+  let started = 0;
+  f.root.get('llm').resolveModelInfo = async (provider, id) => {
+   if (++started === 8) controller.abort();
+   return { provider, id };
+  };
+  await assert.rejects(f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor, controller.signal), { name: 'AbortError' });
+  assert.equal(started, 8);
+  assert.equal(f.calls.stream.length, 0);
+ } finally { await f.close(); }
+});
+
+test('browser-only inherit strategy validates the inherited route', async () => {
+ const f = await fixture(); try {
+  f.allow([]);
+  await assert.rejects(f.controller.operation('recommend', { roleIds: ['ui-verifier'], browserStrategy: { mode: 'inherit' } }, f.actor), /unavailable or unauthorized model: p\/m/);
+  assert.equal(f.calls.stream.length, 0);
+ } finally { await f.close(); }
+});
+
+test('explicit browser-only setup resolves only its selected model', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'p', model: 'vision' }, { provider: 'q', model: 'large' }]);
+  const proposal = await f.controller.operation('recommend', { roleIds: ['ui-verifier'], browserStrategy: { mode: 'fixed', provider: 'p', model: 'vision' } }, f.actor);
+  assert.equal(proposal.rows[0].after.model.model, 'vision');
+  assert.deepEqual(f.calls.metadata, [['p', 'vision']]);
+  assert.ok(f.calls.metadata.length <= 2);
+  assert.equal(f.calls.stream.length, 0);
+ } finally { await f.close(); }
+});
+
+test('AI setup keeps fully excluded browser batches read-only and rejects reclassified roles', async () => {
+ const f = await fixture(); try {
+  const id = 'ui-verifier';
+  const model = { mode: 'fixed', provider: 'p', model: 'vision' };
+  const saved = await f.controller.save({ id, text: JSON.stringify({ schemaVersion: 2, id, model }) });
+  const request = { roleIds: [id], includeBrowser: false, scopePolicy: 'replace-selected' };
+  const stable = await f.controller.operation('recommend', request, f.actor);
+  assert.equal(stable.rows[0].status, 'preserved');
+  const resolved = f.controller.resolved.bind(f.controller);
+  let changed = false;
+  f.controller.resolved = async actor => {
+   const snapshot = await resolved(actor);
+   if (!changed) {
+    changed = true;
+    await f.store.save(id, JSON.stringify({ schemaVersion: 2, id, model, capabilities: { replace: ['files-read'] } }), saved.revision);
+   }
+   return snapshot;
+  };
+  await assert.rejects(f.controller.operation('recommend', request, f.actor), /Selected roles changed during AI setup/);
+  assert.equal(f.calls.stream.length, 0);
+  assert.deepEqual(f.calls.metadata, []);
+ } finally { await f.close(); }
+});
+
+test('AI setup uses an explicit browser strategy without asking the generator for it', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'p', model: 'vision' }]);
+  const browserStrategy = { mode: 'fixed', provider: 'p', model: 'vision' };
+  const request = { roleIds: ['reader', 'ui-verifier'], browserStrategy };
+  const proposal = await f.controller.operation('recommend', request, f.actor);
+  assert.deepEqual(JSON.parse(f.calls.stream[0].messages[0].content).roles.map(role => role.id), ['reader']);
+  assert.deepEqual(proposal.rows.map(row => [row.id, row.status, row.after.model.mode]), [['reader', 'changed', 'auto'], ['ui-verifier', 'changed', 'fixed']]);
+  assert.equal(proposal.rows[1].after.model.model, 'vision');
+  const browserOnly = await f.controller.operation('recommend', { ...request, roleIds: ['ui-verifier'] }, f.actor);
+  assert.equal(browserOnly.rows[0].after.model.model, 'vision');
+  assert.equal(proposal.rows[0].reasons.at(-1).code, 'setup.strategyGenerated');
+  for (const row of [proposal.rows[1], browserOnly.rows[0]]) {
+   assert.equal(row.reasons.at(-1).code, 'setup.strategySelected');
+   assert.match(row.reasons.at(-1).message, /owner-selected/);
+  }
+  assert.equal(f.calls.stream.length, 1);
+  await assert.rejects(f.controller.operation('recommend', { ...request, browserStrategy: { ...browserStrategy, model: 'foreign' } }, f.actor), /unavailable or unauthorized model: p\/foreign/);
+  assert.equal(f.calls.stream.length, 1);
+ } finally { await f.close(); }
+});
+
+test('AI setup rejects a generated route outside the resolved authorized model directory', async () => {
+ const f = await fixture(); try {
+  f.setAiOutput({ strategies: { reader: { mode: 'auto', candidates: [{ id: 'foreign', purpose: 'Use an unavailable route.', provider: 'q', model: 'large', reasoning: { mode: 'model-default' }, maxTokens: 6000 }], defaultCandidate: 'foreign' } } });
+  await assert.rejects(
+    f.controller.operation('recommend', { roleIds: ['reader'], includeBrowser: false }, f.actor),
+    /AI setup proposal selected an unavailable or unauthorized model: q\/large/
+  );
+  assert.equal(f.calls.stream.length, 1);
+ } finally { await f.close(); }
+});
+
 test('new setup defaults can be a no-op and protected overrides require explicit replacement', async () => {
  const f = await fixture(); try {
   const p = await f.controller.operation('recommend', strategyRequest({mode:'inherit'}));
@@ -229,7 +514,7 @@ test('inactive browser strategy does not validate or fetch unrelated routes and 
   assert.equal(p.rows[0].status,'unchanged'); assert.deepEqual(f.calls.metadata,[]);
   await assert.rejects(f.controller.operation('recommend',strategyRequest({mode:'inherit'},{defaultRoute:{provider:'q',model:'large'}})),/mix/);
   await assert.rejects(f.controller.operation('recommend',strategyRequest({mode:'inherit'},{scopePolicy:'all'})),/policy/);
-  await assert.rejects(f.controller.operation('recommend',{roleIds:['reader'],scopePolicy:'fill-unconfigured'}),/strategy/);
+  await assert.rejects(f.controller.operation('recommend',{roleIds:['reader'],scopePolicy:'fill-unconfigured'}),/active Session is required/);
  } finally { await f.close(); }
 });
 

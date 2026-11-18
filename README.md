@@ -26,7 +26,7 @@ AgentDeck does not add a classifier model or a separate execution loop. Configur
 
 | Component | Supported baseline |
 | --- | --- |
-| AgentDeck | `0.2.7` |
+| AgentDeck | `0.2.8` |
 | DeepSeek Harness | **`0.2.2-rc.3`**; other versions are not claimed compatible |
 | Node.js | `>=24.9.0` |
 | Development environment | DSH CLI on `PATH`; the host-link helper uses a POSIX shell |
@@ -39,18 +39,18 @@ DSH supplies its own peer packages. Do not independently upgrade them inside an 
 Install the release from npm into a compatible DSH profile:
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.2.7
+dsh plugin --profile web add dsh-agentdeck@0.2.8
 ```
 
 Use your actual profile name instead of `web`. The DSH plugin manager installs the package and applies its native bundle patch. Restart DSH when the manager requests it, then refresh the existing Harness page.
 
 ### GitHub Release archive
 
-Download `dsh-agentdeck-0.2.7.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
+Download `dsh-agentdeck-0.2.8.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.2.7.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.2.8.tgz
 ```
 
 ### Build from source
@@ -65,7 +65,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.7.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.8.tgz
 ```
 
 Use your actual profile name instead of `web`. `dev:link-host` locates the installed DSH CLI and links its existing public peer packages into this checkout; it does not edit the host or active profile. Set `AGENTDECK_DSH_ROOT` to the installed DSH package directory if the CLI is elsewhere.
@@ -108,10 +108,10 @@ The last three are complete variants. Roles are leaf agents by default. Read-onl
 
 | Tool | Behavior |
 | --- | --- |
-| `scene_agent_catalog` | List/get roles, discover models, preview settings, read compact candidates and task records; model-facing edits may narrow ordinary role settings but cannot change model/resource policy |
+| `scene_agent_catalog` | List/get roles, discover models, preview settings, read compact candidates and task records; save and reset are available on the owner management page |
 | `scene_agent_start` | Start a native child and return its Session ID; omitted role uses `general` |
 | `scene_agent_control` | Read status, continue or interrupt a direct child by `childId` |
-| `scene_agent_result` | Read evidence and paged output without restarting work |
+| `scene_agent_result` | Read evidence and paged output. For later pages pass `nextOffset` as `offset` and include `resultRevision` |
 
 Native completion arrives asynchronously. AgentDeck child IDs and Agent Teams member names are different namespaces. Inactivity alone does not prove successful completion.
 

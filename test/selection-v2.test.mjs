@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -365,49 +365,68 @@ test('compact candidate summaries use only the configured pool and Session route
   } finally { await f.close(); }
 });
 
-test('model-facing saves and resets cannot alter resource policies; owner operations can', async () => {
+test('owner saves and resets preserve other resolved roles inside the write queue', async () => {
   const f = await fixture();
+  const text = (id, patch) => JSON.stringify({ schemaVersion: 2, id, ...patch });
+  const save = (id, patch, expectedRevision) => f.controller.operation('save', { id, text: text(id, patch), expectedRevision }, f.actor);
+  const reset = (id, expectedRevision) => f.controller.operation('reset', { id, expectedRevision }, f.actor);
   try {
-    const policies = [
-      { model: { mode: 'fixed', provider: 'q', model: 'large' } },
-      autoPatch(),
-      { reasoning: { mode: 'fixed', effort: 'high' } },
-      { output: { maxTokens: 2000 } },
-      { context: { targetTokens: 1, elasticTokens: 1 } },
-    ];
-    for (const patch of policies) {
-      const text = definition(patch);
-      await assert.rejects(f.controller.save({ id: 'reader', text }, f.actor, true), /owner-managed/);
-      assert.equal(f.store.getOverride('reader'), undefined);
-      const saved = await f.controller.operation('save', { id: 'reader', text }, f.actor);
-      assert.equal(f.store.getOverride('reader').revision, saved.revision);
-      await assert.rejects(f.controller.reset({ id: 'reader', expectedRevision: saved.revision }, f.actor, true), /owner-managed/);
-      assert.equal(f.store.getOverride('reader').revision, saved.revision);
-      assert.deepEqual(await f.controller.operation('reset', { id: 'reader', expectedRevision: saved.revision }, f.actor), { id: 'reader', reset: true });
-      assert.equal(f.store.getOverride('reader'), undefined);
-    }
-    const note = await f.controller.save({ id: 'reader', text: definition({ instructions: { append: 'Report source coverage.' } }) }, f.actor, true);
-    await f.controller.reset({ id: 'reader', expectedRevision: note.revision }, f.actor, true);
-    assert.equal(f.store.getOverride('reader'), undefined);
+    const base = await save('custom-base', { extends: 'reader' });
+    // Queue the child first so the following write must validate against the serialized state.
+    const childWrite = save('custom-child', { extends: 'custom-base', output: { maxTokens: 2000 } });
+    const resetBase = assert.rejects(reset('custom-base', base.revision), /invalidates derived agents: custom-child/);
+    const child = await childWrite;
+    await resetBase;
+    assert.equal(f.store.getOverride('custom-base').revision, base.revision);
+    await assert.rejects(save('custom-base', { extends: 'reader', ...autoPatch() }, base.revision), /invalidates derived agents: custom-child/);
+    assert.equal(f.store.getOverride('custom-base').revision, base.revision);
+    const updated = await save('custom-base', { extends: 'reader', displayName: 'Updated base' }, base.revision);
+    await reset('custom-child', child.revision);
+    await reset('custom-base', updated.revision);
+    assert.equal(f.store.getOverride('custom-base'), undefined);
   } finally { await f.close(); }
 });
+for (const action of ['save', 'reset']) {
+  test(`owner ${action} protects global dependents hidden by project overrides`, async () => {
+    const f = await fixture();
+    const text = (id, patch) => JSON.stringify({ schemaVersion: 2, id, ...patch });
+    const save = (id, patch, expectedRevision) => f.controller.operation('save', { id, text: text(id, patch), expectedRevision }, f.actor);
+    try {
+      const base = await save('custom-base', { extends: 'reader' });
+      await save('custom-child', { extends: 'custom-base', output: { maxTokens: 2000 } });
+      const project = join(f.directory, '.dsh', 'agentdeck');
+      await mkdir(project, { recursive: true });
+      // Reset can remove a shadowed base. Save needs an unshadowed target,
+      // so instead mask the child whose output cap conflicts with the new auto mode.
+      const shadowId = action === 'reset' ? 'custom-base' : 'custom-child';
+      await writeFile(join(project, `${shadowId}.yaml`), text(shadowId, { extends: 'reader' }));
+      const mutation = action === 'reset'
+        ? f.controller.operation('reset', { id: base.id, expectedRevision: base.revision }, f.actor)
+        : save(base.id, { extends: 'reader', ...autoPatch() }, base.revision);
+      await assert.rejects(mutation, /invalidates derived agents: custom-child/);
+      assert.deepEqual(f.store.getOverride(base.id), base);
+    } finally { await f.close(); }
+  });
+}
 
-test('model-facing updates cannot change an existing pool, default, candidate effort or output', async () => {
+test('batch setup rejects a masked global role loss even when a later row restores it', async () => {
   const f = await fixture();
+  const text = (id, patch) => JSON.stringify({ schemaVersion: 2, id, ...patch });
   try {
-    const saved = await f.controller.save({ id: 'reader', text: definition(autoPatch()) });
-    const variants = [
-      { ...autoPatch(), model: { ...autoPatch().model, defaultCandidate: 'deep' } },
-      { ...autoPatch(), model: { ...autoPatch().model, candidates: [pool()[0]] } },
-      { ...autoPatch(), model: { ...autoPatch().model, candidates: pool().map(candidate => candidate.id === 'deep' ? { ...candidate, maxTokens: 1000 } : candidate) } },
-      { ...autoPatch(), model: { ...autoPatch().model, candidates: pool().map(candidate => candidate.id === 'deep' ? { ...candidate, reasoning: { mode: 'fixed', effort: 'low' } } : candidate) } },
-    ];
-    for (const patch of variants) {
-      await assert.rejects(f.controller.save({ id: 'reader', text: definition(patch), expectedRevision: saved.revision }, f.actor, true), /owner-managed/);
-      assert.equal(f.store.getOverride('reader').revision, saved.revision);
-    }
-    const renamed = await f.controller.save({ id: 'reader', text: definition(autoPatch({ displayName: 'Reader label' })), expectedRevision: saved.revision }, f.actor, true);
-    assert.notEqual(renamed.revision, saved.revision);
+    const middle = await f.controller.save({ id: 'custom-middle', text: text('custom-middle', { extends: 'reader' }) });
+    const child = await f.controller.save({ id: 'custom-child', text: text('custom-child', { extends: 'custom-middle', output: { maxTokens: 2000 } }) });
+    const project = join(f.directory, '.dsh', 'agentdeck');
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, 'custom-child.yaml'), text('custom-child', { extends: 'general' }));
+    const { agents } = await f.controller.catalog(f.actor);
+    const row = (id, patch, expectedRevision) => ({ id, text: text(id, patch), expectedRevision, roleRevision: agents.find(role => role.id === id).revision });
+    const rows = [row('custom-middle', { extends: 'general' }, middle.revision), row('reader', autoPatch())];
+    const lost = /invalidates derived agents: custom-child/;
+    await assert.rejects(f.controller.operation('previewSetup', { rows, setupPolicy: { scopePolicy: 'replace-selected' } }, f.actor), lost);
+    await assert.rejects(f.controller.operation('applySetup', { rows }, f.actor), lost);
+    assert.equal(f.store.getOverride('reader'), undefined);
+    assert.deepEqual(f.store.getOverride('custom-middle'), middle);
+    assert.deepEqual(f.store.getOverride('custom-child'), child);
   } finally { await f.close(); }
 });
 
