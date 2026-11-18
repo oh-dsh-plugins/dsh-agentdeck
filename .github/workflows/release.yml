@@ -188,12 +188,31 @@ jobs:
           import { readFileSync } from 'node:fs';
           import { createHash } from 'node:crypto';
           const expected = readFileSync('artifacts/expected-integrity.txt', 'utf8');
-          const metadata = await fetch(`https://registry.npmjs.org/dsh-agentdeck/${process.env.VERSION}?release=${Date.now()}`);
-          if (!metadata.ok) throw new Error(`Published npm metadata: HTTP ${metadata.status}`);
+          const deadline = performance.now() + 5 * 60_000;
+          async function fetchPublished(path, label) {
+            let saw404 = false;
+            for (;;) {
+              const remaining = Math.ceil(deadline - performance.now());
+              if (remaining <= 0) {
+                const reason = saw404 ? 'HTTP 404 after waiting' : 'verification timed out';
+                throw new Error(`${label}: ${reason} (shared limit: 5 minutes)`);
+              }
+              const response = await fetch(`https://registry.npmjs.org/dsh-agentdeck/${path}?release=${Date.now()}`, {
+                signal: AbortSignal.timeout(remaining),
+              });
+              if (response.ok) return response;
+              if (response.status !== 404) throw new Error(`${label}: HTTP ${response.status}`);
+              if (!saw404) console.log(`${label}: HTTP 404, waiting for npm registry propagation`);
+              saw404 = true;
+              await response.body?.cancel();
+              const delay = Math.min(10_000, deadline - performance.now());
+              if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          }
+          const metadata = await fetchPublished(process.env.VERSION, 'Published npm metadata');
           const published = await metadata.json();
           if (published.dist?.integrity !== expected) throw new Error('Published npm integrity differs from the tested archive');
-          const response = await fetch(`https://registry.npmjs.org/dsh-agentdeck/-/dsh-agentdeck-${process.env.VERSION}.tgz?release=${Date.now()}`);
-          if (!response.ok) throw new Error(`Published npm archive: HTTP ${response.status}`);
+          const response = await fetchPublished(`-/dsh-agentdeck-${process.env.VERSION}.tgz`, 'Published npm archive');
           const actual = `sha512-${createHash('sha512').update(Buffer.from(await response.arrayBuffer())).digest('base64')}`;
           if (actual !== expected) throw new Error('Downloaded npm archive differs from the tested build');
           console.log(`Verified npm dsh-agentdeck@${process.env.VERSION}`);

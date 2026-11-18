@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -10,6 +11,7 @@ const workflow = parse(readFileSync(new URL('../.github/workflows/release.yml', 
 const steps = workflow.jobs.publish.steps;
 const compare = steps.find(step => step.name === 'Verify every file before retaining an existing original archive').run.match(/python3 - <<'PY'\n([\s\S]*)\nPY\s*$/)[1];
 const provenance = steps.find(step => step.name === 'Require provenance to identify the tested tag').run.match(/node --input-type=module <<'NODE'\n([\s\S]*)\nNODE\s*$/)[1];
+const verifyNpm = steps.find(step => step.name === 'Verify public npm metadata and downloaded bytes').run.match(/node --input-type=module <<'NODE'\n([\s\S]*)\nNODE\s*$/)[1];
 const createArchives = `
 import io, json, sys, tarfile
 from pathlib import Path
@@ -69,6 +71,64 @@ test('release rerun rejects changed contents, unsafe entries and write or execut
     assert.match(outcome.stderr, /differs|unique regular package files/);
     assert.deepEqual(readFileSync(join(root, 'artifacts/dsh-agentdeck-0.2.4.tgz')), before);
     assert.equal(existsSync(join(root, 'artifacts/published.tgz')), true);
+  });
+});
+
+function verifyPublished(t, metadataResponses, archiveResponses = []) {
+  const { root } = fixture(t, original);
+  const archive = readFileSync(join(root, 'artifacts/dsh-agentdeck-0.2.4.tgz'));
+  const integrity = 'sha512-' + createHash('sha512').update(archive).digest('base64');
+  writeFileSync(join(root, 'artifacts/expected-integrity.txt'), integrity);
+  const mockRegistry = `
+    import assert from 'node:assert/strict';
+    const replies = { metadata: ${JSON.stringify(metadataResponses)}, archive: ${JSON.stringify(archiveResponses)} };
+    let clock = 0;
+    const seen = new Set();
+    Object.defineProperty(globalThis, 'performance', { value: { now: () => clock } });
+    Date.now = () => 1_760_000_000_000 + clock;
+    globalThis.setTimeout = (callback, delay) => { clock += delay; queueMicrotask(callback); };
+    globalThis.fetch = async input => {
+      const url = new URL(input);
+      assert.equal(url.origin, 'https://registry.npmjs.org');
+      assert.ok(url.searchParams.has('release'));
+      assert.ok(!seen.has(url.href), 'Registry retries must bust cached 404s');
+      seen.add(url.href);
+      const kind = url.pathname.includes('/-/') ? 'archive' : 'metadata';
+      const reply = replies[kind].shift();
+      assert.ok(reply !== undefined, 'Unexpected ' + kind + ' request at ' + clock + ' ms');
+      if (typeof reply === 'number' && reply !== 200) return new Response(null, { status: reply });
+      if (kind === 'metadata') return Response.json({ dist: { integrity: reply === 200 ? ${JSON.stringify(integrity)} : reply } });
+      return new Response(reply === 200 ? Buffer.from(${JSON.stringify(archive.toString('base64'))}, 'base64') : reply);
+    };
+  `;
+  return spawnSync(process.execPath, ['--input-type=module', '-e', mockRegistry + verifyNpm], {
+    cwd: root, env: { ...process.env, VERSION: '0.2.4' }, encoding: 'utf8', timeout: 5000,
+  });
+}
+
+test('release verification waits through npm metadata and archive propagation', t => {
+  const result = verifyPublished(t, [...Array(19).fill(404), 200], [404, 404, 200]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Verified npm dsh-agentdeck@0\.2\.4/);
+});
+
+test('release verification stops when npm stays unavailable for the shared retry window', t => {
+  const result = verifyPublished(t, [...Array(19).fill(404), 200], Array(11).fill(404));
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /Published npm archive: HTTP 404.*5 minutes/);
+});
+
+test('release verification fails immediately on other HTTP errors and mismatched integrity', async t => {
+  const cases = [
+    ['metadata HTTP error', [403], [], /Published npm metadata: HTTP 403/],
+    ['metadata integrity', ['sha512-wrong'], [], /Published npm integrity differs/],
+    ['archive integrity', [200], ['different archive bytes'], /Downloaded npm archive differs/],
+  ];
+  for (const [name, metadata, archive, error] of cases) await t.test(name, child => {
+    const result = verifyPublished(child, metadata, archive);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, error);
+    assert.doesNotMatch(result.stderr, /Unexpected .* request/);
   });
 });
 
