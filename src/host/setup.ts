@@ -5,8 +5,14 @@ import type { AgentDefinition } from '../core/index.js';
 import { object, requiredString } from './types.js';
 import type { JsonObject, OverrideRecord } from './types.js';
 import { roleChoice } from './selection.js';
+import { supportsTextInput } from './models.js';
 
 export const setupDiagnostic = (code: string, message: string, params?: JsonObject) => ({ code, message, ...(params ? { params } : {}) });
+function inputDiagnostic(model: JsonObject, browser: boolean) {
+  if (!supportsTextInput(model)) return setupDiagnostic('setup.textRequired', 'Agent roles require a model that supports text input.');
+  if (browser && !model.inputModalities?.includes('image')) return setupDiagnostic('setup.imageRequired', 'Browser verification requires declared image input support.');
+}
+
 export function setupRoute(value: unknown) {
   const route = object(value, 'route');
   return { provider: requiredString(route.provider, 'provider', 256), model: requiredString(route.model, 'model', 256) };
@@ -142,7 +148,8 @@ export function recommendStrategyRole(role: AgentDefinition, override: OverrideR
     }
     if (info.authorized === false) warnings.push(setupDiagnostic('setup.authorizationWarning', 'The current Session does not authorize this model. Saving does not grant authorization.'));
     else if (info.authorized !== true) warnings.push(setupDiagnostic('setup.authorizationUnknown', 'Session authorization is unverified. Saving does not grant authorization.'));
-    if (browser && !info.inputModalities?.includes('image')) return stop('blocked', 'setup.imageRequired', 'Browser verification requires declared image input support.');
+    const input = inputDiagnostic(info, browser);
+    if (input) return stop('blocked', input.code, input.message);
     if (choice.reasoningEffort && !info.efforts?.some((effort: JsonObject) => effort.id === choice.reasoningEffort)) return stop('blocked', 'setup.effortUnsupported', 'The selected model does not declare the requested reasoning effort.');
     if (choice.maxTokens === undefined) warnings.push(setupDiagnostic('setup.outputAssumed', 'Input estimates use the model default output; another Session may inherit a different limit.'));
     const budget = resolveContextBudget({ ...role.context, windowTokens: info.contextWindow, outputTokens: choice.maxTokens ?? info.defaultMaxTokens });
@@ -180,7 +187,8 @@ export function recommendRole(role: AgentDefinition, override: OverrideRecord | 
   if (options.externalSource) { applicable = false; warnings.push(setupDiagnostic('setup.sourceOwned', 'Edit the source file for this agent.', { source: options.externalSource })); }
   if (browser && !options.includeBrowser) { applicable = false; warnings.push(setupDiagnostic('setup.browserExcluded', 'Browser support was not selected.')); }
   if (applicable && !model?.metadataResolved) { applicable = false; warnings.push(setupDiagnostic('setup.metadataMissing', 'Resolve the selected model metadata before applying.')); }
-  if (browser && model?.metadataResolved && !model.inputModalities?.includes('image')) { applicable = false; warnings.push(setupDiagnostic('setup.imageRequired', 'Browser verification requires a declared image input model.')); }
+  const input = model?.metadataResolved ? inputDiagnostic(model, browser) : undefined;
+  if (input) { applicable = false; warnings.push(input); }
   if (model?.authorized === false) warnings.push(setupDiagnostic('setup.authorizationWarning', 'The current Session does not authorize this model. Saving does not grant authorization.'));
   if (options.capabilitiesMissing) warnings.push(setupDiagnostic('setup.capabilityWarning', 'Some runtime capabilities are missing or unverified. Saving does not enable plugins.'));
   const row: JsonObject = { id: role.id, title: role.title, roleRevision: agentRevision(role), ...(override ? { expectedRevision: override.revision, currentText: override.text } : {}), applicable, reasons, warnings, before: setupResources(role), ...(options.externalSource ? { source: options.externalSource } : {}) };

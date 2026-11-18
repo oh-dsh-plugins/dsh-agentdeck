@@ -55,7 +55,7 @@ test('AI generation requires a selected Session while fixed setup can run withou
   assert.equal(hint(), false);
   f.controller.setSession('live-session');
   await f.controller.loadCatalog();
-  await f.controller.loadProviders();
+  await f.controller.loadSetupModels();
   f.controller.updateSetup({ mode: 'auto', proposalGenerator: { provider: 'p', model: 'm' } });
   assert.equal(button().props.disabled, false);
   assert.equal(hint(), false);
@@ -81,7 +81,7 @@ test('generator options and default come from the selected Session policy', asyn
  }));
  try {
   f.controller.setSession('with-policy');
-  await f.controller.loadCatalog(); f.controller.openSetup(); await f.controller.loadProviders();
+  await f.controller.loadCatalog(); f.controller.openSetup(); await f.controller.loadSetupModels();
   const nodes = () => flatten(render(f.controller));
   const generator = nodes().find(node => node.type === 'select' && node.children.some(child => child?.children?.includes('q/large')));
   assert.deepEqual(clone(generator.children.map(child => child.children[0])), [plugin.dictionaries.en.chooseModel, 'q/large', 'p/allowed']);
@@ -90,9 +90,159 @@ test('generator options and default come from the selected Session policy', asyn
   generator.props.onChange({ target: { value: next.props.value } });
   assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), explicitRoutes[1]);
   f.controller.setSession('empty-policy');
-  await f.controller.loadCatalog(); await f.controller.loadProviders();
+  await f.controller.loadCatalog(); await f.controller.loadSetupModels();
   assert.equal(nodes().find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate)).props.disabled, true);
   assert.ok(nodes().some(node => node.children.includes(plugin.dictionaries.en.setupNoAuthorizedGenerator)));
+ } finally { f.controller.dispose(); }
+});
+
+test('fixed role metadata does not satisfy setup routes, and unsupported generators are disabled', async () => {
+ const route = { provider: 'p', model: 'text' };
+ const selection = { provider: 'p', model: 'vision' };
+ const role = { ...base, model: { mode: 'fixed', ...selection } };
+ const f = harness((endpoint, payload) => {
+  if (endpoint === 'agentdeck.catalog') return ok(catalog([role]));
+  if (endpoint === 'agentdeck.preview') return ok({ agent: role, budget: { known: false } });
+  const result = { providers: [{ id: 'p' }], models: [], selection };
+  if (payload.view === 'setup-options') result.explicitRoutes = [
+   { ...selection, generatorUnavailable: 'non-text' }, route,
+   { provider: 'p', model: 'missing', generatorUnavailable: 'metadata' },
+  ];
+  return ok(result);
+ });
+ try {
+  f.controller.setSession('live');
+  await f.controller.loadCatalog(); await f.controller.syncReads();
+  assert.equal(f.calls.some(call => call.payload.view === 'setup-options'), false);
+  f.controller.openSetup(); await f.controller.loadSetupModels(); await f.controller.syncReads();
+  assert.equal(f.calls.filter(call => call.payload.view === 'setup-options').length, 1);
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), route);
+  const nodes = flatten(render(f.controller));
+  const picker = nodes.find(node => node.type === 'select' && node.children.some(option => option.children.includes('p/text')));
+  assert.ok(picker);
+  const option = label => picker.children.find(child => child.children.some(text => typeof text === 'string' && text.includes(label)));
+  assert.equal(option('p/vision').props.disabled, true);
+  assert.equal(option('p/missing').props.disabled, true);
+  assert.equal(Boolean(option('p/text').props.disabled), false);
+  assert.equal(nodes.find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate)).props.disabled, false);
+ } finally { f.controller.dispose(); }
+});
+
+test('a partial generator response can be retried from setup without resetting the chosen model', async () => {
+  const chosen = { provider: 'p', model: 'text' };
+  const retryable = { provider: 'q', model: 'slow' };
+  let resolved = false;
+  const f = harness(endpoint => ok(endpoint === 'agentdeck.catalog' ? catalog() : {
+    providers: [], models: [], explicitRoutes: [chosen, resolved ? retryable : { ...retryable, generatorUnavailable: 'metadata' }],
+  }));
+  try {
+    f.controller.setSession('live');
+    await f.controller.loadCatalog();
+    f.controller.openSetup();
+    await f.controller.loadSetupModels();
+    const retryButton = () => flatten(render(f.controller)).find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupRetryModelDetails));
+    assert.ok(retryButton());
+    resolved = true;
+    await retryButton().props.onClick();
+    assert.equal(retryButton(), undefined);
+    assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), chosen);
+    assert.deepEqual(clone(f.controller.getSnapshot().explicitRoutes), [chosen, retryable]);
+    assert.equal(f.calls.filter(call => call.payload.view === 'setup-options').length, 2);
+  } finally { f.controller.dispose(); }
+});
+
+test('selecting a Session while setup is open loads its generator after initial role reads', async () => {
+ const pending = deferred();
+ const routes = [{ provider: 'p', model: 'first' }, { provider: 'q', model: 'second' }];
+ const f = harness((endpoint, payload) => {
+  if (endpoint === 'agentdeck.catalog') return ok(catalog());
+  if (endpoint === 'agentdeck.preview') return ok({ agent: base, budget: { known: false } });
+  if (endpoint === 'agentdeck.recommend') return ok({ rows: [] });
+  return payload.sessionId ? pending.promise : ok({ providers: [], models: [], explicitRoutes: [] });
+ });
+ try {
+  await f.controller.loadCatalog();
+  await f.controller.syncReads();
+  f.controller.openSetup();
+  await f.controller.loadSetupModels();
+  f.controller.setSession('live');
+  await f.controller.loadCatalog();
+  const reads = f.controller.syncReads();
+  pending.resolve(ok({ providers: [{ id: 'p' }, { id: 'q' }], models: [], explicitRoutes: routes }));
+  await reads;
+  const nodes = () => flatten(render(f.controller));
+  const generator = nodes().find(node => node.type === 'select' && node.children.some(child => child?.children?.includes('q/second')));
+  assert.ok(generator, 'the open picker receives routes for the newly selected Session');
+  assert.equal(generator.props.disabled, false);
+  const second = generator.children.find(child => child.children.includes('q/second'));
+  generator.props.onChange({ target: { value: second.props.value } });
+  const generate = nodes().find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate));
+  assert.equal(generate.props.disabled, false);
+  await generate.props.onClick();
+  assert.deepEqual(f.calls.find(call => call.endpoint === 'agentdeck.recommend').payload.generatorRoute, routes[1]);
+  assert.equal(f.calls.filter(call => call.endpoint === 'agentdeck.models' && call.payload.sessionId === 'live').length, 1);
+ } finally { f.controller.dispose(); }
+});
+
+test('refresh reloads setup models when the selected role has only a saved override', async () => {
+ const broken = { id: 'broken', revision: 'broken-v1', text: 'invalid' };
+ let model = 'first';
+ const f = harness(endpoint => ok(endpoint === 'agentdeck.catalog' ? catalog([base], [broken])
+  : endpoint === 'agentdeck.preview' ? { agent: base, budget: { known: false } }
+    : { providers: [{ id: 'p' }], models: [], explicitRoutes: [{ provider: 'p', model }] }));
+ try {
+  f.controller.setSession('live');
+  await f.controller.loadCatalog();
+  await f.controller.syncReads();
+  f.controller.openSetup();
+  await f.controller.loadSetupModels();
+  f.controller.select(broken.id);
+  model = 'second';
+  await f.controller.refresh();
+  assert.equal(f.controller.getSnapshot().selectedId, broken.id);
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), { provider: 'p', model: 'second' });
+ } finally { f.controller.dispose(); }
+});
+
+test('retrying generator metadata keeps the selected route and its reviewed proposal', async () => {
+ const selected = { provider: 'p', model: 'text' };
+ const alternate = { provider: 'q', model: 'slow' };
+ const row = { id: base.id, title: base.title, status: 'changed', applicable: true, proposedText: 'new text', roleRevision: base.revision, before: resources(base), after: resources(base), reasons: [], warnings: [] };
+ const impact = { id: 'derived', title: { en: 'Derived' }, before: row.before, after: row.after, prefixes: [] };
+ let routes = [selected, { ...alternate, generatorUnavailable: 'metadata' }];
+ const f = harness(endpoint => ok(endpoint === 'agentdeck.catalog' ? catalog()
+  : endpoint === 'agentdeck.recommend' ? { setupPolicy: { scopePolicy: 'fill-unconfigured' }, rows: [row] }
+  : endpoint === 'agentdeck.previewSetup' ? { resources: { reader: row.after }, impactRevision: 'reviewed', impacts: [impact] }
+  : { providers: [], models: [], explicitRoutes: routes }));
+ try {
+  f.controller.setSession('live');
+  await f.controller.loadCatalog();
+  f.controller.openSetup();
+  await f.controller.loadSetupModels();
+  await f.controller.recommendSetup();
+  f.controller.acceptSetupImpact('derived', true);
+  const before = f.controller.getSnapshot();
+  assert.equal(before.setupPreviewReady, true);
+  const retry = () => flatten(render(f.controller)).find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupRetryModelDetails));
+  const generate = () => flatten(render(f.controller)).find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate));
+  routes = [{ ...selected, generatorUnavailable: 'metadata' }, alternate];
+  await retry().props.onClick();
+  const unavailable = f.controller.getSnapshot();
+  assert.deepEqual(clone(unavailable.setupOptions.proposalGenerator), selected);
+  assert.equal(unavailable.setupProposal, before.setupProposal);
+  assert.equal(unavailable.setupPreviewReady, true);
+  assert.equal(unavailable.setupImpactRevision, 'reviewed');
+  assert.equal(unavailable.setupAccepted.derived, true);
+  assert.equal(generate().props.disabled, true);
+  const picker = flatten(render(f.controller)).find(node => node.type === 'select' && node.children.some(option => option.children.includes('q/slow')));
+  const shown = picker.children.find(option => option.props.value === picker.props.value);
+  assert.match(shown.children[0], /p\/text/);
+  assert.equal(shown.props.disabled, true);
+  routes = [selected, alternate];
+  await retry().props.onClick();
+  assert.equal(generate().props.disabled, false);
+  assert.equal(f.controller.getSnapshot().setupProposal, before.setupProposal);
+  assert.equal(f.calls.filter(call => call.endpoint === 'agentdeck.recommend').length, 1);
  } finally { f.controller.dispose(); }
 });
 
@@ -103,13 +253,24 @@ test('a refreshed Session policy replaces an obsolete generator selection', asyn
   f.controller.setSession('session');
   await f.controller.loadCatalog();
   f.controller.openSetup();
-  await f.controller.loadProviders();
+  await f.controller.loadSetupModels();
   assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), route);
   route = { provider: 'p', model: 'second' };
-  await f.controller.loadProviders(true);
+  await f.controller.loadSetupModels(true);
   assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), route);
+  f.controller.set({ setupProposal: { rows: [] }, setupPreviewReady: true });
+  route = { ...route, generatorUnavailable: 'non-text' };
+  await f.controller.loadSetupModels(true);
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), { provider: '', model: '' });
+  assert.equal(f.controller.getSnapshot().setupProposal, null);
+  assert.equal(f.controller.getSnapshot().setupPreviewReady, false);
+  const nodes = flatten(render(f.controller));
+  assert.ok(nodes.some(node => node.children.includes(plugin.dictionaries.en.setupNoUsableGenerator)));
+  assert.equal(nodes.find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate)).props.disabled, true);
+  route = { provider: 'p', model: 'second' };
+  await f.controller.loadSetupModels(true);
   f.controller.updateSetup({ proposalGenerator: { provider: '', model: '' } });
-  await f.controller.loadProviders(true);
+  await f.controller.loadSetupModels(true);
   assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), { provider: '', model: '' });
  } finally { f.controller.dispose(); }
 });
@@ -194,17 +355,29 @@ test('indirect consent is mandatory, subset-bound, and sent with the exact previ
 
 test('constructor impact requires explicit boolean consent in the UI and apply request',async()=>{
  const row={id:'reader',title:base.title,status:'changed',applicable:true,proposedText:'new text',roleRevision:base.revision,before:resources(base),after:resources(base),reasons:[],warnings:[]};
- const impact={id:'constructor',title:{en:'Constructor'},before:resources(base),after:resources(base),prefixes:[{afterId:'reader',resources:resources(base)}]};
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[row]}:endpoint==='agentdeck.previewSetup'?{resources:{reader:resources(base)},impactRevision:'constructor-impact',impacts:[impact]}:endpoint==='agentdeck.applySetup'?{status:'completed',rows:[{id:'reader',status:'applied'}]}:{providers:[],models:[]}));
+ const globalAfter = resources({ ...base, model: { mode: 'fixed', provider: 'p', model: 'global-model' } });
+ const global = { before: resources(base), after: globalAfter, prefixes: [{ afterId: 'reader', resources: globalAfter }] };
+ const impact = { id: 'constructor', title: { en: 'Constructor' }, before: resources(base), after: resources(base), prefixes: [], global };
+ const globalOnly = { id: 'outside-project', title: { en: 'Outside project' }, scope: 'global', ...global };
+ const projectAfter = resources({ ...base, model: { mode: 'fixed', provider: 'p', model: 'project-model' } });
+ globalOnly.projects = [{ cwd: '/projects/another', ...global, after: projectAfter }];
+ const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[row]}:endpoint==='agentdeck.previewSetup'?{resources:{reader:resources(base)},impactRevision:'constructor-impact',impacts:[impact, globalOnly]}:endpoint==='agentdeck.applySetup'?{status:'completed',rows:[{id:'reader',status:'applied'}]}:{providers:[],models:[]}));
  const assertConsent=accepted=>{
   const nodes=flatten(render(f.controller));
-  const label=nodes.find(node=>node.type==='label'&&node.children.includes(plugin.dictionaries.en.setupAcceptImpact));
-  assert.ok(label);const checkbox=flatten(label).find(node=>node.type==='input'&&node.props.type==='checkbox');
+  const labels = nodes.filter(node => node.type === 'label' && node.children.includes(plugin.dictionaries.en.setupAcceptImpact));
+  assert.equal(labels.length, 2);
+  assert.equal(nodes.filter(node => node.children.includes(plugin.dictionaries.en.setupImpactGlobal)).length, 2);
+  assert.equal(nodes.filter(node => node.children.includes(plugin.dictionaries.en.setupImpactProject)).length, 1);
+  assert.ok(nodes.some(node => node.children.some(child => typeof child === 'string' && child.startsWith('p/global-model'))));
+  assert.ok(nodes.some(node => node.children.includes('Project configuration · /projects/another')));
+  assert.ok(nodes.some(node => node.children.some(child => typeof child === 'string' && child.startsWith('p/project-model'))));
+  const checkbox=flatten(labels[0]).find(node=>node.type==='input'&&node.props.type==='checkbox');
   assert.ok(checkbox);assert.equal(checkbox.props.checked,accepted);assert.equal(checkbox.props.disabled,false);
   const apply=nodes.find(node=>node.type==='button'&&node.children.includes(plugin.dictionaries.en.setupApply.replace('{count}','1')));
   assert.ok(apply);assert.equal(Boolean(apply.props.disabled),!accepted);
  };
  try{await f.controller.loadCatalog();f.controller.openSetup();await f.controller.recommendSetup();
+ f.controller.acceptSetupImpact('outside-project', true);
  assert.equal(Object.hasOwn(f.controller.getSnapshot().setupAccepted,'constructor'),false);assertConsent(false);
  assert.equal((await f.controller.applySetup()).ok,false);assert.equal(f.calls.some(call=>call.endpoint==='agentdeck.applySetup'),false);
  f.controller.acceptSetupImpact('constructor',1);assertConsent(false);assert.equal((await f.controller.applySetup()).ok,false);
@@ -212,7 +385,7 @@ test('constructor impact requires explicit boolean consent in the UI and apply r
  f.controller.acceptSetupImpact('constructor',false);assertConsent(false);assert.equal((await f.controller.applySetup()).ok,false);
  assert.equal(f.calls.some(call=>call.endpoint==='agentdeck.applySetup'),false);
  f.controller.acceptSetupImpact('constructor',true);assertConsent(true);assert.equal((await f.controller.applySetup()).ok,true);
- const call=f.calls.find(call=>call.endpoint==='agentdeck.applySetup');assert.deepEqual(call.payload.acceptedIndirectRoles,['constructor']);assert.equal(call.payload.impactRevision,'constructor-impact');
+ const call=f.calls.find(call=>call.endpoint==='agentdeck.applySetup');assert.deepEqual(call.payload.acceptedIndirectRoles,['constructor','outside-project']);assert.equal(call.payload.impactRevision,'constructor-impact');
  }finally{f.controller.dispose();}
 });
 

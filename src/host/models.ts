@@ -52,8 +52,88 @@ export class ModelAuthorizationError extends Error {
   constructor(readonly details: JsonObject) { super(details.message); }
 }
 
+export function supportsTextInput(model: JsonObject): boolean {
+  return !Array.isArray(model.inputModalities) || model.inputModalities.includes('text');
+}
+
 export function modelView(info: JsonObject, authorized: boolean | null): JsonObject {
   return { provider: info.provider, id: info.id, name: info.name ?? info.id, authorized, metadataResolved: true, ...(info.context?.contextWindow ? { contextWindow: info.context.contextWindow } : {}), ...(info.defaultMaxTokens ? { defaultMaxTokens: info.defaultMaxTokens } : {}), efforts: info.reasoning?.efforts ?? [], ...(info.reasoning?.defaultEffort ? { defaultEffort: info.reasoning.defaultEffort } : {}), ...(info.inputModalities ? { inputModalities: info.inputModalities } : {}) };
+}
+
+type ModelRoute = { provider: string; model: string };
+type ModelEntry = { provider: string; id: string; name?: string };
+type ModelAuthorization = (provider: string, model: string) => boolean | null;
+
+const METADATA_CONCURRENCY = 8;
+// Keep the picker inside its RPC timeout even when an adapter ignores cancellation.
+const METADATA_DEADLINE_MS = 4_000;
+const METADATA_TIMEOUT = 'Model metadata did not resolve before the lookup deadline. Retry to check the declaration again.';
+
+async function resolveModelRows(ctx: HostContext, entries: ModelEntry[], allowed: ModelAuthorization,
+  signal?: AbortSignal, optionsOnly = false): Promise<JsonObject[]> {
+  signal?.throwIfAborted();
+  const rows: JsonObject[] = entries.map(({ provider, id, name }) => ({
+    provider, id, name: name ?? id, authorized: allowed(provider, id), metadataResolved: false,
+  }));
+  if (optionsOnly || !entries.length) return rows;
+  const llm = ctx.get('llm');
+  if (!llm) return rows.map(row => ({ ...row, error: 'Native llm service is unavailable.' }));
+
+  const deadline = new AbortController();
+  const lookup = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+  let stop!: () => void;
+  const stopped = new Promise<void>(resolve => { stop = resolve; });
+  lookup.addEventListener('abort', stop, { once: true });
+  const timer = setTimeout(() => deadline.abort(), METADATA_DEADLINE_MS);
+  // Reserve time for later groups even when every lookup in the first group stalls.
+  const waves = Math.ceil(rows.length / METADATA_CONCURRENCY);
+  const slotMs = Math.max(1, Math.floor(METADATA_DEADLINE_MS / waves));
+  let cursor = 0;
+  const worker = async () => {
+    while (!lookup.aborted && cursor < rows.length) {
+      const index = cursor++;
+      const row = rows[index];
+      const slot = new AbortController();
+      const attempt = AbortSignal.any([lookup, slot.signal]);
+      let cancel!: () => void;
+      const cancelled = new Promise<undefined>(resolve => { cancel = () => resolve(undefined); });
+      attempt.addEventListener('abort', cancel, { once: true });
+      const slotTimer = setTimeout(() => slot.abort(), slotMs);
+      try {
+        const info = await Promise.race([llm.resolveModelInfo(row.provider, row.id, attempt), cancelled]);
+        if (info && !attempt.aborted) rows[index] = modelView(info, row.authorized);
+      } catch (error) {
+        if (!attempt.aborted) rows[index] = { ...row, error: messageOf(error) };
+      } finally {
+        clearTimeout(slotTimer);
+        attempt.removeEventListener('abort', cancel);
+        if (slot.signal.aborted && !lookup.aborted) rows[index] = { ...row, error: METADATA_TIMEOUT };
+      }
+    }
+  };
+  try {
+    await Promise.race([Promise.all(Array.from({ length: Math.min(METADATA_CONCURRENCY, rows.length) }, worker)), stopped]);
+    signal?.throwIfAborted();
+    return deadline.signal.aborted ? rows.map(row => row.metadataResolved || row.error ? row : { ...row, error: METADATA_TIMEOUT }) : rows;
+  } finally {
+    clearTimeout(timer);
+    lookup.removeEventListener('abort', stop);
+  }
+}
+
+/** Resolve a deduplicated batch with a single Session policy observation and deadline. */
+export async function modelDeclarations(ctx: HostContext, entries: ModelRoute[], agent: RuntimeAgent | undefined,
+  signal?: AbortSignal, routeSnapshot?: { routes: Awaited<ReturnType<typeof sessionRoutes>> }): Promise<JsonObject[]> {
+  if (!entries.length) return [];
+  const policy = routeSnapshot ? routeSnapshot.routes : await sessionRoutes(ctx, agent, signal);
+  const allowed = modelPermissions(agent, explicitModelRoutes(delegationSelection(agent), policy));
+  const unique = new Map(entries.map(route => [JSON.stringify([route.provider, route.model]), { provider: route.provider, id: route.model }]));
+  return resolveModelRows(ctx, [...unique.values()], allowed, signal);
+}
+
+function modelPermissions(agent: RuntimeAgent | undefined, routes: ModelRoute[]): ModelAuthorization {
+  const allowed = new Set(routes.map(route => JSON.stringify([route.provider, route.model])));
+  return (provider, model) => agent ? allowed.has(JSON.stringify([provider, model])) : null;
 }
 
 export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, query?: { provider: string; model?: string }, signal?: AbortSignal, optionsOnly = false, authorizedRoutesOnly = false, routeSnapshot?: { routes: Awaited<ReturnType<typeof sessionRoutes>> }): Promise<JsonObject> {
@@ -66,7 +146,7 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
   signal?.throwIfAborted();
   const explicitRoutes = explicitModelRoutes(inheritance, routes);
   if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), explicitRoutes, policy: !agent ? 'not-selected' : routes ? 'session' : 'parent-only', diagnostics: [] };
-  const allowed = (provider: string, model: string) => !agent ? null : explicitRoutes.some(route => route.provider === provider && route.model === model);
+  const allowed = modelPermissions(agent, explicitRoutes);
   const diagnostics: string[] = [];
   const rows = new Map<string, any>();
   const exact = query?.model ? { provider: query.provider, model: query.model } : undefined;
@@ -82,25 +162,6 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
     const key = `${route.provider}\0${route.model}`;
     if (!rows.has(key)) rows.set(key, { provider: route.provider, id: route.model, name: route.model });
   }
-  const entries = [...rows.values()];
-  const models = new Array<JsonObject>(entries.length);
-  let cursor = 0;
-  const resolveOne = async () => {
-    while (true) {
-      signal?.throwIfAborted();
-      const index = cursor++;
-      if (index >= entries.length) return;
-      const entry = entries[index];
-      const provider = entry.provider;
-      const base = { provider, id: entry.id, name: entry.name ?? entry.id, authorized: allowed(provider, entry.id) };
-      if (optionsOnly && !exact) { models[index] = { ...base, metadataResolved: false }; continue; }
-      try {
-        const info = await llm.resolveModelInfo(provider, entry.id, signal);
-        models[index] = modelView(info, base.authorized);
-      } catch (error) { signal?.throwIfAborted(); models[index] = { ...base, metadataResolved: false, error: messageOf(error) }; }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(8, entries.length) }, resolveOne));
-  signal?.throwIfAborted();
+  const models = await resolveModelRows(ctx, [...rows.values()], allowed, signal, optionsOnly && !exact);
   return { providers, models, ...(selection ? { selection } : {}), policy: !agent ? 'not-selected' : routes ? 'session' : 'parent-only', diagnostics };
 }

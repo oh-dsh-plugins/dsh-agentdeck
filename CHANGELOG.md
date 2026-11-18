@@ -2,6 +2,13 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.2.10 — Model picker and cross-project setup fixes
+
+- Load authorized model choices before a role is selected. Preserve the selected generator, proposal and preview through temporary metadata failures.
+- Bound model lookups and give later routes time to resolve when earlier lookups stall. Require text input support in AI-assisted and manual setup.
+- Require consent for indirect resource changes across known projects, including project-defined roles with matching IDs. Preserve existing derived roles during global edits.
+- Reject non-regular project role files without blocking configuration saves.
+
 ## 0.2.9 — Reliable AI-assisted setup
 
 - Offer only generators allowed by the selected Session and clear stale setup previews when that policy changes.

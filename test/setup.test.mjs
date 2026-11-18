@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { constants } from 'node:fs';
+import { mkdir, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -412,6 +414,44 @@ test('AI setup rejects a generator that explicitly lacks text input before strea
  } finally { await f.close(); }
 });
 
+test('setup model options flag unusable authorized routes without discovering provider models', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'vision' }, { provider: 'p', model: 'm' }, { provider: 'q', model: 'missing' }]);
+  const llm = f.root.get('llm');
+  const resolve = llm.resolveModelInfo;
+  llm.resolveModelInfo = async (provider, model, signal) => ({ ...await resolve(provider, model, signal), inputModalities: model === 'vision' ? ['image'] : undefined });
+  await f.controller.operation('models', { view: 'options' }, f.actor);
+  assert.deepEqual(f.calls.metadata, []);
+  const options = await f.controller.operation('models', { view: 'setup-options' }, f.actor);
+  assert.deepEqual(options.explicitRoutes, [
+   { provider: 'p', model: 'vision', generatorUnavailable: 'non-text' },
+   { provider: 'p', model: 'm' },
+   { provider: 'q', model: 'missing', generatorUnavailable: 'metadata' },
+  ]);
+  assert.deepEqual(f.calls.directory, []);
+ } finally { await f.close(); }
+});
+
+test('AI setup excludes image-only role candidates and preserves a valid text row', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'p', model: 'vision' }]);
+  const llm = f.root.get('llm');
+  const resolve = llm.resolveModelInfo;
+  llm.resolveModelInfo = async (provider, model, signal) => ({ ...await resolve(provider, model, signal), inputModalities: model === 'vision' ? ['image'] : ['text'] });
+  const auto = model => ({ mode: 'auto', candidates: [{ ...pool()[0], model }], defaultCandidate: 'fast' });
+  f.setAiOutput({ strategies: { general: auto('m'), reader: auto('vision'), 'ui-verifier': auto('vision') } });
+  const proposal = await f.controller.operation('recommend', { roleIds: ['general', 'reader', 'ui-verifier'] }, f.actor);
+  const prompt = JSON.parse(f.calls.stream[0].messages[0].content[0].text);
+  assert.deepEqual(prompt.constraints.allowedModels.map(row => row.model), ['m']);
+  assert.equal(proposal.rows.find(row => row.id === 'general').applicable, true);
+  for (const id of ['reader', 'ui-verifier']) {
+   const row = proposal.rows.find(row => row.id === id);
+   assert.equal(row.applicable, false);
+   assert.match(row.warnings.find(warning => warning.code === 'setup.generatedStrategyInvalid').original, /p\/vision.*does not support text input/);
+  }
+ } finally { await f.close(); }
+});
+
 test('AI setup accepts a single fenced JSON response and still rejects prose', async () => {
  const f = await fixture(); try {
   const request = { roleIds: ['reader'], includeBrowser: false };
@@ -672,6 +712,35 @@ test('indirect prefix impacts require version-bound acceptance even when final r
  } finally { await f.close(); }
 });
 
+test('batch setup discloses global impacts hidden or altered by a project overlay', async () => {
+ const f = await fixture(); try {
+  const hidden = 'global-only-reader', both = 'global-and-project-reader';
+  for (const id of [hidden, both]) await f.controller.save({ id, text: JSON.stringify({ schemaVersion: 2, id, extends: 'reader' }) });
+  const folder = join(f.directory, '.dsh', 'agentdeck');
+  await mkdir(folder, { recursive: true });
+  await writeFile(join(folder, 'fixed.yml'), JSON.stringify({ schemaVersion: 2, id: hidden, model: { mode: 'fixed', provider: 'p', model: 'project-model' } }));
+  await writeFile(join(folder, 'budget.yml'), JSON.stringify({ schemaVersion: 2, id: both, context: { targetTokens: 2000, elasticTokens: 4000 } }));
+  const before = (await f.controller.catalog(f.actor)).agents.find(role => role.id === 'reader');
+  const request = { setupPolicy: { scopePolicy: 'fill-unconfigured' }, rows: [{ id: before.id, roleRevision: before.revision,
+   text: JSON.stringify({ schemaVersion: 2, id: before.id, model: { mode: 'fixed', provider: 'p', model: 'global-model' } }) }] };
+  const preview = await f.controller.operation('previewSetup', request, f.actor);
+  assert.equal(preview.resources[hidden].model.model, 'project-model');
+  const globalOnly = preview.impacts.find(impact => impact.id === hidden);
+  assert.equal(globalOnly?.scope, 'global');
+  assert.equal(globalOnly.before.model.mode, 'inherit');
+  assert.equal(globalOnly.prefixes[0].resources.model.model, 'global-model');
+  const scoped = preview.impacts.find(impact => impact.id === both);
+  assert.equal(scoped.after.context.targetTokens, 2000);
+  assert.equal(scoped.global.after.model.model, 'global-model');
+  assert.notEqual(scoped.global.after.context.targetTokens, 2000);
+  const apply = acceptedIndirectRoles => f.controller.operation('applySetup', { ...request, impactRevision: preview.impactRevision, acceptedIndirectRoles }, f.actor);
+  await assert.rejects(apply([both]), /Confirm every/);
+  assert.equal(f.store.getOverride('reader'), undefined);
+  assert.equal((await apply([both, hidden])).status, 'completed');
+  assert.equal((await f.controller.catalog()).agents.find(role => role.id === hidden).model.model, 'global-model');
+ } finally { await f.close(); }
+});
+
 test('a changed unrelated catalog invalidates setup impact consent before any new writes', async () => {
  const f = await fixture(); try {
   const p = await f.controller.operation('recommend',strategyRequest({mode:'fixed',provider:'q',model:'large'}));
@@ -688,4 +757,262 @@ test('batch failure preserves successful rows and leaves later rows untouched', 
   assert.equal(result.status,'stopped');assert.deepEqual(result.rows.map(row=>row.status),['applied','failed','not-run']);
   assert.equal(f.store.getOverride('a').text,'first');assert.equal(f.store.getOverride('b'),undefined);assert.equal(f.store.getOverride('c'),undefined);
  } finally {await f.close();}
+});
+
+test('global writes reject invalidating roles in other live or stored project roots', async () => {
+ const f = await fixture();
+ try {
+  const other = join(f.directory, 'other');
+  const dir = join(other, '.dsh', 'agentdeck');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'role.yml'), JSON.stringify({ schemaVersion: 2, id: 'budget-reader', extends: 'reader', output: { maxTokens: 2000 } }));
+  f.root.provide('sessionQuery', { listSessions: async () => [{ header: { cwd: other }, live: false, persisted: true }] });
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'], strategy: { mode: 'auto', candidates: [pool()[0]], defaultCandidate: 'fast' } });
+  const request = strategyPayload(proposal);
+  const invalidates = /invalidates derived agents: budget-reader/;
+  await assert.rejects(f.controller.operation('previewSetup', request), invalidates);
+  await assert.rejects(f.controller.operation('applySetup', request), invalidates);
+  await assert.rejects(f.controller.save({ id: 'reader', text: request.rows[0].text }), invalidates);
+  assert.equal(f.store.getOverride('reader'), undefined);
+  const base = await f.controller.save({ id: 'custom-base', text: JSON.stringify({ schemaVersion: 2, id: 'custom-base', extends: 'reader' }) });
+  await writeFile(join(dir, 'role.yml'), JSON.stringify({ schemaVersion: 2, id: 'project-reader', extends: 'custom-base' }));
+  const agent = { ...f.actor, id: 'other', session: { ...f.actor.session, header: { cwd: other } } };
+  f.root.get('workingDirectory').get = session => session.header.cwd;
+  f.root.get('agents').list = () => [f.actor, agent];
+  f.root.get('sessionQuery').listSessions = async () => [];
+  await assert.rejects(f.controller.reset({ id: 'custom-base', expectedRevision: base.revision }), /invalidates derived agents: project-reader/);
+  assert.equal(f.store.getOverride('custom-base').revision, base.revision);
+ } finally { await f.close(); }
+});
+
+test('batch consent includes other projects and rejects stale project changes', async () => {
+ const f = await fixture();
+ try {
+  const other = join(f.directory, 'other');
+  const dir = join(other, '.dsh', 'agentdeck');
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, 'role.yml');
+  const role = { schemaVersion: 2, id: 'project-reader', extends: 'reader' };
+  await writeFile(file, JSON.stringify(role));
+  f.root.provide('sessionQuery', { listSessions: async () => [{ header: { cwd: other } }] });
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'], strategy: { mode: 'fixed', provider: 'q', model: 'large' } });
+  const request = strategyPayload(proposal);
+  const preview = await f.controller.operation('previewSetup', request);
+  const [impact] = preview.impacts;
+  assert.equal(impact.id, 'project-reader');
+  assert.equal(impact.projects[0].cwd, other);
+  assert.equal(impact.projects[0].after.model.mode, 'fixed');
+  await assert.rejects(f.controller.operation('applySetup', { ...request, impactRevision: preview.impactRevision }), /Confirm every indirect role impact/);
+  await writeFile(file, JSON.stringify({ ...role, displayName: 'Changed after preview' }));
+  await assert.rejects(f.controller.operation('applySetup', { ...request, impactRevision: preview.impactRevision, acceptedIndirectRoles: [role.id] }), /preview changed/);
+  const current = await f.controller.operation('previewSetup', request);
+  const receipt = await f.controller.operation('applySetup', { ...request, impactRevision: current.impactRevision, acceptedIndirectRoles: [role.id] });
+  assert.equal(receipt.status, 'completed');
+ } finally { await f.close(); }
+});
+
+test('global-only preview labels global and divergent project impacts separately', async () => {
+  const f = await fixture();
+  try {
+    const derived = { schemaVersion: 2, id: 'derived-reader', extends: 'reader' };
+    await f.controller.save({ id: derived.id, text: JSON.stringify(derived) });
+    const other = join(f.directory, 'other');
+    const directory = join(other, '.dsh', 'agentdeck');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'role.yml'), JSON.stringify({ ...derived, output: { maxTokens: 2000 } }));
+    f.root.provide('sessionQuery', { listSessions: async () => [{ header: { cwd: other } }] });
+    const proposal = await f.controller.recommend({ roleIds: ['reader'], strategy: { mode: 'fixed', provider: 'q', model: 'large' } });
+    const preview = await f.controller.previewSetup(strategyPayload(proposal));
+    const impact = preview.impacts.find(item => item.id === derived.id);
+    assert.equal(impact.scope, 'global');
+    assert.equal(impact.projects[0].cwd, other);
+    assert.equal(impact.projects[0].after.output.maxTokens, 2000);
+  } finally { await f.close(); }
+});
+
+test('setup consent covers a selected role ID when another project owns that role', async () => {
+ const f = await fixture();
+ try {
+  const projects = ['other-a', 'other-b'].map(name => join(f.directory, name));
+  const id = 'derived-reader';
+  const derived = { schemaVersion: 2, id, extends: 'reader' };
+  const saved = await f.controller.save({ id, text: JSON.stringify(derived) });
+  for (const cwd of projects) {
+   const directory = join(cwd, '.dsh', 'agentdeck');
+   await mkdir(directory, { recursive: true });
+   await writeFile(join(directory, 'role.yml'), JSON.stringify({ ...derived, context: { targetTokens: 1000, elasticTokens: 2000 } }));
+  }
+  f.allow([{ provider: 'p', model: 'm' }]);
+  f.root.get('sessionQuery').listSessions = async () => projects.map(cwd => ({ header: { cwd } }));
+  f.root.get('workingDirectory').get = session => session.header.cwd;
+  const catalog = await f.controller.catalog(f.actor);
+  const fixed = (provider, model) => ({ mode: 'fixed', provider, model });
+  const request = { setupPolicy: { scopePolicy: 'replace-selected' }, rows: [
+   { id: 'reader', roleRevision: catalog.agents.find(role => role.id === 'reader').revision, text: definition({ model: fixed('q', 'large') }) },
+   { id, roleRevision: catalog.agents.find(role => role.id === id).revision, expectedRevision: saved.revision,
+    text: JSON.stringify({ ...derived, model: fixed('p', 'm') }) },
+  ] };
+  const preview = await f.controller.previewSetup(request, f.actor);
+  assert.deepEqual(preview.resources[id].model, fixed('p', 'm'));
+  const impact = preview.impacts.find(item => item.id === id);
+  assert.equal(impact?.scope, 'projects');
+  assert.deepEqual(impact.projects.map(project => project.cwd), projects);
+  for (const project of impact.projects) {
+   assert.deepEqual(project.before.model, { mode: 'inherit' });
+   assert.deepEqual(project.after.model, fixed('q', 'large'));
+  }
+  const apply = acceptedIndirectRoles => f.controller.applySetup({ ...request, impactRevision: preview.impactRevision, acceptedIndirectRoles }, f.actor);
+  await assert.rejects(apply([]), /Confirm every indirect role impact/);
+  assert.equal(f.store.getOverride('reader'), undefined);
+  assert.equal((await apply([id])).status, 'completed');
+ } finally { await f.close(); }
+});
+
+test('owner save allows a new project derivation but preserves roles already valid outside the project', async () => {
+ const f = await fixture();
+ try {
+  const localParent = 'local-parent';
+  const local = join(f.directory, '.dsh', 'agentdeck');
+  await mkdir(local, { recursive: true });
+  await writeFile(join(local, 'parent.yml'), JSON.stringify({ schemaVersion: 2, id: localParent, extends: 'reader' }));
+  const role = (id, parent) => JSON.stringify({ schemaVersion: 2, id, extends: parent });
+  const id = 'existing-reader';
+  const saved = await f.controller.save({ id, text: role(id, 'reader') }, f.actor);
+  const newId = 'local-reader';
+  assert.equal((await f.controller.save({ id: newId, text: role(newId, localParent) }, f.actor)).id, newId);
+  await assert.rejects(f.controller.save({ id, text: role(id, localParent), expectedRevision: saved.revision }, f.actor), /invalidates derived agents: existing-reader/);
+  assert.equal(f.store.getOverride(id).revision, saved.revision);
+  assert.ok((await f.controller.catalog()).agents.some(agent => agent.id === id));
+ } finally { await f.close(); }
+});
+
+test('an unopened historical role FIFO is rejected without holding the save open', { skip: process.platform === 'win32' }, async () => {
+ const f = await fixture();
+ let pending, unblock, timer;
+ try {
+  const other = join(f.directory, 'historical');
+  const directory = join(other, '.dsh', 'agentdeck');
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, 'role.yml');
+  execFileSync('mkfifo', [path]);
+  f.root.provide('sessionQuery', { listSessions: async () => [{ header: { cwd: other } }] });
+  pending = f.controller.save({ id: 'reader', text: definition({ instructions: 'Read the source.' }) }).catch(error => error);
+  const outcome = await Promise.race([pending, new Promise(resolve => { timer = setTimeout(() => resolve('pending'), 750); })]);
+  if (outcome === 'pending') unblock = await open(path, constants.O_RDWR | constants.O_NONBLOCK);
+  assert.match(outcome?.message ?? String(outcome), /regular UTF-8 file/);
+  assert.equal(f.store.getOverride('reader'), undefined);
+ } finally {
+  clearTimeout(timer);
+  await pending;
+  await unblock?.close();
+  await f.close();
+ }
+});
+
+test('an authorized image-only route from a saved definition cannot launch a text task', async () => {
+  const f = await fixture();
+  try {
+    const route = { provider: 'q', model: 'image-only' };
+    f.allow([route]);
+    const llm = f.root.get('llm');
+    const resolve = llm.resolveModelInfo;
+    llm.resolveModelInfo = async (...args) => ({ ...(await resolve(...args)), inputModalities: ['image'] });
+    await f.controller.save({ id: 'reader', text: definition({ model: { mode: 'fixed', ...route } }) }, f.actor);
+    const preview = await f.controller.preview('reader', f.actor);
+    assert.equal(preview.authorization.status, 'authorized');
+    assert.equal(preview.agent.available, false);
+    assert.ok(preview.diagnostics.some(message => /supports text input/.test(message)));
+    await assert.rejects(f.controller.start({ role: 'reader', prompt: 'Read the task.' }, {
+      agent: f.actor, callId: 'non-text', signal: new AbortController().signal,
+    }), /supports text input/);
+    assert.equal(f.store.snapshots().length, 0);
+  } finally { await f.close(); }
+});
+
+test('setup model options return fast declarations while a different adapter remains stalled', async t => {
+ const f = await fixture();
+ try {
+  f.allow([{ provider: 'p', model: 'm' }, { provider: 'q', model: 'stuck' }]);
+  const llm = f.root.get('llm');
+  const resolve = llm.resolveModelInfo;
+  let markStarted;
+  const started = new Promise(done => { markStarted = done; });
+  let finishLate;
+  let slowSignal;
+  llm.resolveModelInfo = async (provider, model, signal) => {
+   if (model !== 'stuck') return resolve(provider, model);
+   slowSignal = signal;
+   markStarted();
+   return new Promise(done => { finishLate = done; });
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const response = f.controller.models(f.actor, { view: 'setup-options' });
+  await started;
+  await new Promise(done => setImmediate(done));
+  t.mock.timers.tick(10_000);
+  const reply = await Promise.race([response, new Promise(done => setImmediate(() => done(null)))]);
+  assert.ok(reply, 'the picker must settle before the stalled adapter returns');
+  assert.deepEqual(reply.explicitRoutes, [{ provider: 'p', model: 'm' }, { provider: 'q', model: 'stuck', generatorUnavailable: 'metadata' }]);
+  assert.equal(slowSignal.aborted, true);
+  finishLate({ provider: 'q', id: 'stuck' });
+  await new Promise(done => setImmediate(done));
+  assert.equal(reply.explicitRoutes[1].generatorUnavailable, 'metadata');
+ } finally { await f.close(); }
+});
+
+test('setup metadata gives later authorized routes a turn even if every first lookup stalls', async t => {
+ const f = await fixture();
+ const stalled = [];
+ try {
+  const later = { provider: 'p', model: 'm' };
+  const first = Array.from({ length: 8 }, (_, index) => ({ provider: 'q', model: 'stuck-' + index }));
+  f.allow([...first, later]);
+  const llm = f.root.get('llm');
+  const resolve = llm.resolveModelInfo;
+  let started;
+  const initial = new Promise(done => { started = done; });
+  llm.resolveModelInfo = async (provider, model, signal) => {
+   if (provider === later.provider) {
+    assert.equal(stalled.filter(call => !call.signal.aborted).length, 0);
+    return resolve(provider, model, signal);
+   }
+   return new Promise(done => {
+    stalled.push({ signal, done });
+    if (stalled.length === first.length) started();
+   });
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = f.controller.models(f.actor, { view: 'setup-options' });
+  await initial;
+  for (let index = 0; index < 4; index++) {
+   t.mock.timers.tick(1000);
+   await new Promise(done => setImmediate(done));
+  }
+  const result = await pending;
+  assert.deepEqual(result.explicitRoutes, [...first.map(route => ({ ...route, generatorUnavailable: 'metadata' })), later]);
+  assert.deepEqual(f.calls.metadata, [[later.provider, later.model]]);
+ } finally {
+  for (const { done } of stalled) done({});
+  await f.close();
+ }
+});
+
+test('all setup modes require text input even for a declared image model', async () => {
+ const f = await fixture();
+ try {
+  const route = { provider: 'q', model: 'image-only' };
+  const llm = f.root.get('llm');
+  const resolve = llm.resolveModelInfo;
+  llm.resolveModelInfo = async (...args) => ({ ...(await resolve(...args)), inputModalities: ['image'] });
+  const fixed = { mode: 'fixed', ...route };
+  const auto = { mode: 'auto', candidates: [{ ...pool()[0], ...route }], defaultCandidate: 'fast' };
+  for (const settings of [{ strategy: fixed }, { strategy: auto }, { defaultRoute: route, imageRoute: route }]) {
+   const result = await f.controller.recommend({ roleIds: ['reader', 'ui-verifier'], ...settings });
+   assert.equal(result.rows.length, 2);
+   for (const row of result.rows) {
+    assert.equal(row.applicable, false, row.id);
+    assert.ok(row.warnings.some(warning => warning.code === 'setup.textRequired'), row.id);
+   }
+  }
+ } finally { await f.close(); }
 });

@@ -139,17 +139,24 @@ test('explicit public native RPC getter retains the consumer scope through Cordi
   } finally { await binding?.dispose(); await f.close(); }
 });
 
-test('AI setup goes through authenticated RPC and the native LLM stream', async () => {
+test('AI setup goes through the Client, authenticated RPC and the native LLM stream', async () => {
   const f = await fixture();
+  let controller;
   try {
-    const sessionId = f.h.parent.id;
-    const { explicitRoutes } = value(await f.rpc.call('/agentdeck', 'agentdeck.models', { sessionId, view: 'options' }));
-    assert.ok(explicitRoutes.some(route => route.provider === ROUTE.provider && route.model === ROUTE.model));
+    const plugin = await clientPlugin();
+    controller = plugin.createController({ rpc: f.rpc });
+    controller.setSession(f.h.parent.id);
+    value(await controller.loadCatalog());
+    controller.openSetup();
+    value(await controller.loadSetupModels());
     const generatorRoute = { provider: ROUTE.provider, model: ROUTE.model };
+    assert.deepEqual({ ...controller.getSnapshot().setupOptions.proposalGenerator }, generatorRoute);
+    assert.equal(f.h.adapter.requests.length, 0);
     f.h.adapter.setupReply = JSON.stringify({ strategies: { reader: { mode: 'auto', defaultCandidate: 'local', candidates: [
       { id: 'local', purpose: 'Read sources.', ...generatorRoute, reasoning: { mode: 'model-default' }, maxTokens: 1024 },
     ] } } });
-    const result = value(await f.rpc.call('/agentdeck', 'agentdeck.recommend', { sessionId, roleIds: ['reader'], includeBrowser: false, generatorRoute }));
+    controller.updateSetup({ roleIds: ['reader'], includeBrowser: false });
+    const result = value(await controller.recommendSetup());
     assert.equal(result.proposalSource, 'ai');
     assert.equal(result.rows[0].after.model.defaultCandidate, 'local');
     assert.equal(f.h.adapter.requests.length, 1);
@@ -157,7 +164,7 @@ test('AI setup goes through authenticated RPC and the native LLM stream', async 
     assert.equal(message.role, 'user');
     assert.equal(message.content[0].type, 'text');
     assert.deepEqual(JSON.parse(message.content[0].text).constraints.proposalGenerator, generatorRoute);
-  } finally { await f.close(); }
+  } finally { controller?.dispose(); await f.close(); }
 });
 
 test('dedicated AgentDeck HTTP RPC coexists with an occupied native /api interceptor', async () => {
