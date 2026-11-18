@@ -30,12 +30,16 @@ export async function sessionRoutes(ctx: HostContext, agent?: RuntimeAgent, sign
   } finally { observation[Symbol.dispose](); }
 }
 
+export function explicitModelRoutes(parent: JsonObject | undefined, routes: Awaited<ReturnType<typeof sessionRoutes>>) {
+  return routes ?? (parent?.provider && parent.model ? [{ provider: parent.provider, model: parent.model }] : []);
+}
+
 /** Match native implicit inheritance and explicit route policy without discovering models. */
 export function routeAuthorization(configured: EffectiveSelection | undefined, parent: JsonObject | undefined,
   routes: { provider: string; model: string }[] | undefined, hasSession: boolean, explicit: boolean): JsonObject {
   if (!hasSession || !configured || !parent) return { status: 'unknown' };
   const same = parent.provider === configured.provider && parent.model === configured.model;
-  const allowedModels = routes ?? [{ provider: parent.provider, model: parent.model }];
+  const allowedModels = explicitModelRoutes(parent, routes);
   if ((!explicit && same) || allowedModels.some(route => route.provider === configured.provider && route.model === configured.model)) return { status: 'authorized' };
   const allowed = allowedModels.slice(0, 8).map(route => `${route.provider}/${route.model}`).join(', ') || '(none)';
   return { status: 'denied', code: 'AGENTDECK_MODEL_NOT_AUTHORIZED', policy: routes ? 'session' : 'parent-only',
@@ -58,9 +62,11 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
   const providers = llm.listProviders();
   const selection = currentSelection(agent);
   const inheritance = delegationSelection(agent);
-  if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), policy: agent ? 'unresolved' : 'not-selected', diagnostics: [] };
   const routes = routeSnapshot ? routeSnapshot.routes : await sessionRoutes(ctx, agent, signal);
-  const allowed = (provider: string, model: string) => !agent ? null : routes ? routes.some(route => route.provider === provider && route.model === model) : inheritance?.provider === provider && inheritance.model === model;
+  signal?.throwIfAborted();
+  const explicitRoutes = explicitModelRoutes(inheritance, routes);
+  if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), explicitRoutes, policy: !agent ? 'not-selected' : routes ? 'session' : 'parent-only', diagnostics: [] };
+  const allowed = (provider: string, model: string) => !agent ? null : explicitRoutes.some(route => route.provider === provider && route.model === model);
   const diagnostics: string[] = [];
   const rows = new Map<string, any>();
   const exact = query?.model ? { provider: query.provider, model: query.model } : undefined;
@@ -70,7 +76,7 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
     } catch (error) { diagnostics.push(`${provider.id}: ${messageOf(error)}`); }
   }));
   const routeRows = authorizedRoutesOnly
-    ? (routes ?? (inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : []))
+    ? explicitRoutes
     : [...(routes ?? []), ...(selection ? [{ provider: selection.provider, model: selection.model }] : []), ...(inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : [])];
   for (const route of exact ? [exact] : routeRows.filter(route => !query || route.provider === query.provider)) {
     const key = `${route.provider}\0${route.model}`;

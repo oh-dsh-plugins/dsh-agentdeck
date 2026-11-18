@@ -2,6 +2,13 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.2.9 — Reliable AI-assisted setup
+
+- Offer only generators allowed by the selected Session and clear stale setup previews when that policy changes.
+- Send native text blocks, respect model input and output limits, and handle truncated or fenced JSON responses.
+- Isolate invalid generated strategies to the affected role and skip model lookups for excluded or protected roles.
+- Reject proposals when selected overrides change during generation and keep apply receipts within the originating Session.
+
 ## 0.2.8 — AI-assisted setup and configuration safeguards
 
 - Generate separate candidate strategies for each selected role using an authorized model. Preserve protected roles and validate model metadata, cancellation, and response limits.

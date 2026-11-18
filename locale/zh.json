@@ -531,6 +531,8 @@
     "setupInheritHint": "默认流程会让 AI 根据所选角色和约束分析并生成方案，审核后再保存。",
     "setupAutoHint": "让 AI 根据所选角色、可用模型和约束分析并生成候选，审核后再保存。",
     "setupAiProposalHint": "无需预先建立候选池。AI 使用所选供应商和模型请求一次并返回只读提案；你仍需选择角色、确认影响后才能保存。",
+    "setupNoAuthorizedGenerator": "所选会话未授权任何模型用于生成 AI 建议。",
+    "setupSessionRequired": "请在 AgentDeck 顶部选择一个活跃会话，再生成 AI 建议。如果列表为空，请先打开一个会话，然后刷新 AgentDeck。",
     "setupAiGenerator": "方案生成模型",
     "setupAiGeneratorHint": "请选择当前 Session 已授权的供应商和模型用于分析请求。旧客户端未传入时，会回退到当前 Session 模型。",
     "setupOutputPolicy": "角色输出上限",
@@ -568,6 +570,7 @@
     "setup.inheritanceUnverified": "缺少匹配的 Session 元数据，继承的模型资源或图像能力尚未验证。",
     "setup.authorizationUnknown": "Session 授权尚未验证；保存配置不会授予权限。",
     "setup.strategyGenerated": "使用通过本地校验的 AI 生成策略。",
+    "setup.generatedStrategyInvalid": "AI 为此角色生成的策略无效或缺失。请重新生成以配置此角色。",
     "setup.strategySelected": "应用明确选择的策略，不进行模型排名或推测性发现。"
   }
 }

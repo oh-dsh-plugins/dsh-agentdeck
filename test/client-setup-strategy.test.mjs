@@ -35,6 +35,35 @@ test('first open selects only clean unconfigured owned roles and never reseeds a
  }finally{f.controller.dispose();}
 });
 
+test('AI generation requires a selected Session while fixed setup can run without one', async () => {
+ const f = harness(endpoint => ok(endpoint === 'agentdeck.catalog'
+  ? { ...catalog(), sessions: [{ id: 'live-session' }] }
+  : { providers: [], models: [], rows: [], explicitRoutes: [{ provider: 'p', model: 'm' }] }));
+ try {
+  await f.controller.loadCatalog();
+  f.controller.openSetup();
+  const button = () => flatten(render(f.controller)).find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate));
+  const hint = () => flatten(render(f.controller)).some(node => node.type === 'p' && node.props.id === 'agentdeck-setup-session-required');
+  for (const mode of ['inherit', 'auto']) {
+   f.controller.updateSetup({ mode, proposalGenerator: { provider: 'p', model: 'm' } });
+   assert.equal(button().props.disabled, true);
+   assert.equal(button().props['aria-describedby'], 'agentdeck-setup-session-required');
+   assert.equal(hint(), true);
+  }
+  f.controller.updateSetup({ defaultRoute: { provider: 'p', model: 'm' } });
+  assert.equal(button().props.disabled, false);
+  assert.equal(hint(), false);
+  f.controller.setSession('live-session');
+  await f.controller.loadCatalog();
+  await f.controller.loadProviders();
+  f.controller.updateSetup({ mode: 'auto', proposalGenerator: { provider: 'p', model: 'm' } });
+  assert.equal(button().props.disabled, false);
+  assert.equal(hint(), false);
+  await button().props.onClick();
+  assert.equal(f.calls.find(call => call.endpoint === 'agentdeck.recommend').payload.sessionId, 'live-session');
+ } finally { f.controller.dispose(); }
+});
+
 test('inherit generation uses the AI proposal route and no-op rows never preview or save',async()=>{
  const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[{id:'reader',title:base.title,status:'unchanged',applicable:false,before:resources(base),after:resources(base),reasons:[],warnings:[]}]}:{providers:[],models:[]}));
  try{await f.controller.loadCatalog();f.controller.openSetup();f.controller.updateSetup({proposalGenerator:{provider:'p',model:'m'}});await f.controller.recommendSetup();
@@ -44,19 +73,44 @@ test('inherit generation uses the AI proposal route and no-op rows never preview
  }finally{f.controller.dispose();}
 });
 
-test('switching AI provider survives a model-list response carrying the Session default', async()=>{
- const providers=[{id:'p'},{id:'q'}], selection={provider:'p',model:'m'}, q=deferred();
- const f=harness((endpoint,payload)=>endpoint==='agentdeck.catalog'?ok(catalog()):payload.provider==='q'&&!payload.model?q.promise:ok({providers,models:[],selection}));
+test('generator options and default come from the selected Session policy', async () => {
+ const selection = { provider: 'p', model: 'denied' };
+ const explicitRoutes = [{ provider: 'q', model: 'large' }, { provider: 'p', model: 'allowed' }];
+ const f = harness((endpoint, { sessionId }) => ok(endpoint === 'agentdeck.catalog' ? catalog() : {
+  providers: [{ id: 'p' }, { id: 'q' }], models: [], selection, explicitRoutes: sessionId === 'with-policy' ? explicitRoutes : [],
+ }));
  try {
+  f.controller.setSession('with-policy');
   await f.controller.loadCatalog(); f.controller.openSetup(); await f.controller.loadProviders();
-  const selects=()=>flatten(render(f.controller)).filter(node=>node.type==='select');
-  selects().find(node=>node.props.value==='p').props.onChange({target:{value:'q'}});
-  const loading=f.controller.loadModelOptions('q');
-  q.resolve(ok({providers,models:[{id:'large',provider:'q',authorized:true}],selection}));
-  await loading;
-  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator),{provider:'q',model:''});
-  selects().find(node=>node.children.some(child=>child?.props?.value==='large')).props.onChange({target:{value:'large'}});
-  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator),{provider:'q',model:'large'});
+  const nodes = () => flatten(render(f.controller));
+  const generator = nodes().find(node => node.type === 'select' && node.children.some(child => child?.children?.includes('q/large')));
+  assert.deepEqual(clone(generator.children.map(child => child.children[0])), [plugin.dictionaries.en.chooseModel, 'q/large', 'p/allowed']);
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), explicitRoutes[0]);
+  const next = generator.children.find(child => child.children.includes('p/allowed'));
+  generator.props.onChange({ target: { value: next.props.value } });
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), explicitRoutes[1]);
+  f.controller.setSession('empty-policy');
+  await f.controller.loadCatalog(); await f.controller.loadProviders();
+  assert.equal(nodes().find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate)).props.disabled, true);
+  assert.ok(nodes().some(node => node.children.includes(plugin.dictionaries.en.setupNoAuthorizedGenerator)));
+ } finally { f.controller.dispose(); }
+});
+
+test('a refreshed Session policy replaces an obsolete generator selection', async () => {
+ let route = { provider: 'p', model: 'first' };
+ const f = harness(endpoint => ok(endpoint === 'agentdeck.catalog' ? catalog() : { providers: [], models: [], explicitRoutes: [route] }));
+ try {
+  f.controller.setSession('session');
+  await f.controller.loadCatalog();
+  f.controller.openSetup();
+  await f.controller.loadProviders();
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), route);
+  route = { provider: 'p', model: 'second' };
+  await f.controller.loadProviders(true);
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), route);
+  f.controller.updateSetup({ proposalGenerator: { provider: '', model: '' } });
+  await f.controller.loadProviders(true);
+  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), { provider: '', model: '' });
  } finally { f.controller.dispose(); }
 });
 
@@ -171,6 +225,30 @@ test('inherit mode uses the AI form and preserves fixed inputs',async()=>{
  assert.deepEqual(call.payload.generatorRoute,{provider:'p',model:'m'});
  assert.equal(f.controller.getSnapshot().setupOptions.fixed.outputPolicy.mode,'preserve');
  }finally{f.controller.dispose();}
+});
+
+test('failed setup reconciliation cannot publish a receipt into a newly selected Session', async () => {
+ const pending = deferred();
+ const started = deferred();
+ const f = harness(endpoint => endpoint === 'agentdeck.applySetup' ? { ok: false, error: { message: 'write response lost' } } : endpoint === 'agentdeck.catalog' ? (started.resolve(), pending.promise) : ok(catalog()));
+ try {
+  f.controller.setSession('old');
+  f.controller.set({ setupPreviewReady: true, setupSelected: { reader: true }, setupProposal: { rows: [{ id: 'reader', applicable: true, proposedText: 'text', roleRevision: 'reader-v1' }] } });
+  const write = f.controller.applySetup();
+  await started.promise;
+  // Resolve the old catalog with a failure synchronously during its error publication.
+  const unsub = f.controller.subscribe(() => {
+   if (f.controller.getSnapshot().errors.catalog) {
+    unsub();
+    f.controller.setSession('new');
+   }
+  });
+  pending.resolve({ ok: false, error: { message: 'readback failed' } });
+  await write;
+  unsub();
+  assert.equal(f.controller.getSnapshot().sessionId, 'new');
+  assert.equal(f.controller.getSnapshot().setupResult, null);
+ } finally { f.controller.dispose(); }
 });
 
 test('options, draft edits and Session changes invalidate consent and obsolete preview replies',async()=>{

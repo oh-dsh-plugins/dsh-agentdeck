@@ -77,7 +77,7 @@ window.__ModuleLoader__.load({
         evidence: {}, setupOpen: false, setupSeeded: false,
         setupOptions: { mode: 'inherit', inheritOutputPolicy: { mode: 'preserve' }, fixed: { mode: 'fixed', provider: '', model: '', reasoning: { mode: 'model-default' }, outputPolicy: { mode: 'preserve' } }, auto: { mode: 'auto', candidates: [], defaultCandidate: '' }, proposalGenerator: { provider: '', model: '' }, scopePolicy: 'fill-unconfigured', defaultRoute: { provider: '', model: '' }, imageRoute: { provider: '', model: '' }, includeBrowser: true, browserSeparate: false, resourceMigration: {}, roleIds: [] },
         setupProposal: null, setupSelected: {}, setupPreviewReady: false, setupImpacts: [], setupImpactRevision: null, setupAccepted: {}, setupResult: null,
-        models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, previewCandidates: {}, runs: null, result: null, resultChild: '',
+        models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, explicitRoutes: [], preview: null, previewCandidates: {}, runs: null, result: null, resultChild: '',
         creating: false, newId: '', newBase: 'general', imported: false,
         errors: {}, busy: {}, notice: ''
       };
@@ -173,6 +173,7 @@ window.__ModuleLoader__.load({
           const setupIds = new Set(catalog.agents.map(agent => agent.id));
           const setupOptions = { ...state.setupOptions, roleIds: state.setupOptions.roleIds.filter(id => setupIds.has(id)) };
           publish({ catalog, drafts, selectedId, setupOptions, evidence: {} });
+          if (state.setupOpen) void loadProviders();
         });
       }
       function select(id) { ensureDraft(id); publish({ selectedId: id, creating: false, preview: null, notice: '' }); }
@@ -296,11 +297,15 @@ window.__ModuleLoader__.load({
         publish({ drafts: { ...state.drafts, [id]: makeDraft(id) }, errors: { ...state.errors, save: null, reset: null }, notice: '' });
       }
       function acceptProviders(value) {
-        const selection = value.selection && value.selection.provider && value.selection.model
-          ? { provider: value.selection.provider, model: value.selection.model } : undefined;
+        const routes = value.explicitRoutes;
+        const selection = routes?.find(route => route.provider === value.selection?.provider && route.model === value.selection?.model) ?? routes?.[0];
         const current = state.setupOptions.proposalGenerator || { provider: '', model: '' };
-        const proposalGenerator = selection && !generatorTouched && !state.busy.recommend && !current.provider && !current.model ? selection : current;
-        publish({ providers: value.providers, providersLoaded: true,
+        const selected = Boolean(current.provider && current.model);
+        const obsolete = selected && routes && !routes.some(route => route.provider === current.provider && route.model === current.model);
+        const proposalGenerator = obsolete ? selection ?? { provider: '', model: '' }
+          : selection && !generatorTouched && !state.busy.recommend && !selected ? selection : current;
+        if (obsolete) { invalidateSetup(); generatorTouched = false; }
+        publish({ providers: value.providers, providersLoaded: true, ...(routes ? { explicitRoutes: routes } : {}),
           ...(proposalGenerator !== current ? { setupOptions: { ...state.setupOptions, proposalGenerator } } : {}) });
       }
       function loadProviders(force = false) {
@@ -433,7 +438,7 @@ window.__ModuleLoader__.load({
         refreshing = true;
         cancelModelReads();
         requests.get('preview')?.abort(); requests.delete('preview');
-        publish({ preview: null, evidence: {}, busy: { ...state.busy, preview: false }, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false });
+        publish({ preview: null, evidence: {}, busy: { ...state.busy, preview: false }, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, explicitRoutes: [] });
         try {
           const answer = await loadCatalog();
           if (answer.ok && !disposed) { refreshing = false; await syncReads(true); }
@@ -447,7 +452,7 @@ window.__ModuleLoader__.load({
         modelReadKey = previewReadKey = undefined;
         for (const key of ['catalog', 'preview', 'runs', 'result']) { requests.get(key)?.abort(); requests.delete(key); }
         generatorTouched = false;
-        publish({ sessionId, catalog: null, evidence: {}, setupResult: null, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, preview: null, runs: null, result: null, resultChild: '', setupOptions: { ...state.setupOptions, proposalGenerator: { provider: '', model: '' } }, errors: {}, busy: {} });
+        publish({ sessionId, catalog: null, evidence: {}, setupResult: null, models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, explicitRoutes: [], preview: null, runs: null, result: null, resultChild: '', setupOptions: { ...state.setupOptions, proposalGenerator: { provider: '', model: '' } }, errors: {}, busy: {} });
       }
       function invalidateSetup() {
         for (const key of ['recommend', 'setupPreview']) { requests.get(key)?.abort(); requests.delete(key); }
@@ -556,10 +561,11 @@ window.__ModuleLoader__.load({
         if (policy && !state.setupImpactRevision) return { ok: false };
         const acceptance = policy ? { setupPolicy: policy, impactRevision: state.setupImpactRevision, acceptedIndirectRoles: state.setupImpacts.map(impact => impact.id) } : {};
         publish({ setupResult: null, setupProposal: null, setupPreviewReady: false, setupImpacts: [], setupAccepted: {}, setupImpactRevision: null });
+        const session = state.sessionId;
         const answer = await request('applySetup', 'applySetup', { rows: payload, ...acceptance, ...sessionPayload() }, value => publish({ setupResult: value }));
-        if (disposed) return answer;
+        if (disposed || state.sessionId !== session) return answer;
         const readback = await loadCatalog();
-        if (!answer.ok && !readback.aborted && !disposed) publish({ setupResult: { status: 'reconciled', rows: rows.map(row => ({ id: row.id, status: readback.ok && findOverride(row.id)?.text === row.proposedText ? 'observed' : 'unknown' })) } });
+        if (!answer.ok && !readback.aborted && !disposed && state.sessionId === session) publish({ setupResult: { status: 'reconciled', rows: rows.map(row => ({ id: row.id, status: readback.ok && findOverride(row.id)?.text === row.proposedText ? 'observed' : 'unknown' })) } });
         return answer;
       }
       function stageSetup(id) {
@@ -809,7 +815,10 @@ window.__ModuleLoader__.load({
       const pendingAcceptance = state.setupImpacts.some(impact => state.setupAccepted[impact.id] !== true);
       const proposalGenerator = options.proposalGenerator || { provider: '', model: '' };
       const strategyIssues = options.mode === 'fixed' ? formIssues({ model: options.fixed, reasoning: options.fixed.reasoning, ...(options.fixed.outputPolicy.mode === 'set' ? { output: { maxTokens: options.fixed.outputPolicy.maxTokens } } : {}) }) : [];
-      const generatorMissing = options.mode !== 'fixed' && (!proposalGenerator.provider || !proposalGenerator.model);
+      const usesAi = options.mode !== 'fixed' && !(options.mode === 'auto' && options.auto.candidates.length);
+      const sessionMissing = usesAi && !state.sessionId;
+      const generatorIndex = state.explicitRoutes.findIndex(route => route.provider === proposalGenerator.provider && route.model === proposalGenerator.model);
+      const generatorMissing = usesAi && generatorIndex < 0;
       const picker = (route, update, chooseModel) => {
         const choices = controller.modelOptionsState(route.provider);
         const exact = controller.modelMetadataState(route.provider, route.model);
@@ -851,7 +860,14 @@ window.__ModuleLoader__.load({
           options.mode === 'auto' && h('p', { className: 'ad-help' }, t('setupAutoHint')),
           h('p', { className: 'ad-help', role: 'status' }, t('setupAiProposalHint')),
           h('p', { className: 'ad-help' }, t('setupAiGeneratorHint')),
-          picker(proposalGenerator, patch => controller.updateSetup({ proposalGenerator: { provider: patch.provider ?? proposalGenerator.provider, model: patch.model ?? proposalGenerator.model } }))),
+          h(Field, { label: t('model') }, h('select', {
+            value: generatorIndex < 0 ? '' : String(generatorIndex), disabled: busy || !state.explicitRoutes.length,
+            onChange: event => {
+              const route = event.target.value === '' ? undefined : state.explicitRoutes[Number(event.target.value)];
+              controller.updateSetup({ proposalGenerator: route ?? { provider: '', model: '' } });
+            },
+          }, h('option', { value: '' }, t('chooseModel')), state.explicitRoutes.map((route, index) => h('option', { key: JSON.stringify([route.provider, route.model]), value: String(index) }, route.provider + '/' + route.model)))),
+          usesAi && !sessionMissing && state.providersLoaded && !state.explicitRoutes.length && h('p', { className: 'ad-help', role: 'status' }, t('setupNoAuthorizedGenerator'))),
         h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.includeBrowser, disabled: busy, onChange: event => controller.updateSetup({ includeBrowser: event.target.checked }) }), t('setupBrowser')),
         options.mode === 'fixed' && browserActive && h('details', { className: 'ad-details' }, h('summary', null, t('setupImageModel')),
           h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: options.browserSeparate, disabled: busy, onChange: event => controller.updateSetup({ browserSeparate: event.target.checked }) }), t('setupBrowserSeparate')),
@@ -865,7 +881,8 @@ window.__ModuleLoader__.load({
         h('p', { className: 'ad-help' }, t('setupLimit')),
         h(ErrorNotice, { value: state.errors.providers, t, retry: () => controller.loadProviders(true) }), h(ErrorNotice, { value: state.errors.recommend, t }),
         strategyIssues.length > 0 && h('p', { className: 'ad-warning' }, t('setupInputsIncomplete')),
-        h(Button, { primary: true, disabled: busy || state.busy.recommend || !options.roleIds.length || strategyIssues.length > 0 || generatorMissing || (options.mode === 'fixed' && browserActive && options.browserSeparate && (!options.imageRoute.provider || !options.imageRoute.model)), onClick: () => controller.recommendSetup() }, t(state.busy.recommend ? 'loading' : 'setupGenerate')),
+        sessionMissing && h('p', { id: 'agentdeck-setup-session-required', className: 'ad-help', role: 'status' }, t('setupSessionRequired')),
+        h(Button, { primary: true, 'aria-describedby': sessionMissing ? 'agentdeck-setup-session-required' : undefined, disabled: busy || state.busy.recommend || sessionMissing || !options.roleIds.length || strategyIssues.length > 0 || generatorMissing || (options.mode === 'fixed' && browserActive && options.browserSeparate && (!options.imageRoute.provider || !options.imageRoute.model)), onClick: () => controller.recommendSetup() }, t(state.busy.recommend ? 'loading' : 'setupGenerate')),
         proposal && h('div', { className: 'ad-section' },
           h('h4', null, t('setupReview')), h('p', { className: 'ad-help', role: 'status' }, t('setupReviewSummary', { changed: selected, unchanged: proposal.rows.filter(row => row.status === 'unchanged').length, preserved: proposal.rows.filter(row => row.status === 'preserved').length, blocked: proposal.rows.filter(row => row.status === 'blocked').length, indirect: state.setupPreviewReady ? state.setupImpacts.length : t('setupPreviewPending') })),
           h('p', { className: 'ad-help' }, t('setupInheritance')), h(DiagnosticList, { items: proposal.diagnostics, t }),

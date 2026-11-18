@@ -86,6 +86,7 @@ export class LocalProofAdapter extends LlmAdapter {
   resolutionStarted = deferred();
   childGate;
   resolutionGate;
+  setupReply;
 
   providerInfo(id) { return { id, name: 'Isolated local proof adapter' }; }
 
@@ -117,7 +118,7 @@ export class LocalProofAdapter extends LlmAdapter {
       if (this.childGate) await cancellableGate(this.childGate.promise, options.signal);
     }
     options.signal?.throwIfAborted();
-    const text = isParent ? 'Parent received the native completion notice.' : CHILD_TEXT;
+    const text = this.setupReply ?? (isParent ? 'Parent received the native completion notice.' : CHILD_TEXT);
     yield { type: 'block-start', index: 0, blockType: 'text' };
     yield { type: 'text-delta', index: 0, text };
     yield { type: 'block-end', index: 0, block: { type: 'text', text } };

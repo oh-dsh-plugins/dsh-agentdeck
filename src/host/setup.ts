@@ -58,7 +58,7 @@ export function setupStrategyRoutes(strategy: JsonObject): { provider: string; m
 /** Propose declarations only: authorization and plugin availability remain native runtime checks. */
 export function recommendStrategyRole(role: AgentDefinition, override: OverrideRecord | undefined, strategy: JsonObject, models: JsonObject[], options: {
   externalSource?: string; includeBrowser: boolean; capabilitiesMissing: boolean; parent?: JsonObject;
-  scopePolicy: 'fill-unconfigured' | 'replace-selected'; resourceMigration?: JsonObject; strategySource?: 'owner' | 'ai';
+  scopePolicy: 'fill-unconfigured' | 'replace-selected'; resourceMigration?: JsonObject; strategySource?: 'owner' | 'ai'; invalidGeneratedStrategy?: string;
 }): JsonObject {
   const parsed = normalizeSetupStrategy(strategy);
   if (!['fill-unconfigured', 'replace-selected'].includes(options.scopePolicy)) throw new Error('Invalid setup scopePolicy');
@@ -77,6 +77,12 @@ export function recommendStrategyRole(role: AgentDefinition, override: OverrideR
   if (options.externalSource) return stop('preserved', 'setup.sourceOwned', 'Edit the source file for this agent.', { source: options.externalSource });
   if (browser && !options.includeBrowser) return stop('preserved', 'setup.browserExcluded', 'Browser support was not selected.');
   if (options.scopePolicy === 'fill-unconfigured' && (override || !role.enabled)) return stop('preserved', 'setup.configuredPreserved', 'Existing overrides and disabled agents are preserved.');
+
+  if (options.invalidGeneratedStrategy !== undefined) {
+    const warning = { ...setupDiagnostic('setup.generatedStrategyInvalid', 'The AI-generated strategy is invalid or missing. Regenerate to configure this role.'), original: options.invalidGeneratedStrategy };
+    warnings.push(warning);
+    return row;
+  }
 
   let model: AgentDefinition['model'] = parsed.mode === 'auto' ? parsed as AgentDefinition['model']
     : parsed.mode === 'fixed' ? { mode: 'fixed', provider: parsed.provider, model: parsed.model } : { mode: 'inherit' };
@@ -173,7 +179,7 @@ export function recommendRole(role: AgentDefinition, override: OverrideRecord | 
   let applicable = true;
   if (options.externalSource) { applicable = false; warnings.push(setupDiagnostic('setup.sourceOwned', 'Edit the source file for this agent.', { source: options.externalSource })); }
   if (browser && !options.includeBrowser) { applicable = false; warnings.push(setupDiagnostic('setup.browserExcluded', 'Browser support was not selected.')); }
-  if (!model?.metadataResolved) { applicable = false; warnings.push(setupDiagnostic('setup.metadataMissing', 'Resolve the selected model metadata before applying.')); }
+  if (applicable && !model?.metadataResolved) { applicable = false; warnings.push(setupDiagnostic('setup.metadataMissing', 'Resolve the selected model metadata before applying.')); }
   if (browser && model?.metadataResolved && !model.inputModalities?.includes('image')) { applicable = false; warnings.push(setupDiagnostic('setup.imageRequired', 'Browser verification requires a declared image input model.')); }
   if (model?.authorized === false) warnings.push(setupDiagnostic('setup.authorizationWarning', 'The current Session does not authorize this model. Saving does not grant authorization.'));
   if (options.capabilitiesMissing) warnings.push(setupDiagnostic('setup.capabilityWarning', 'Some runtime capabilities are missing or unverified. Saving does not enable plugins.'));
