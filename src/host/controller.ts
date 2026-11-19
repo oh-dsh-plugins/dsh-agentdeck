@@ -5,14 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { loadBuiltinAgents, loadBuiltinSkills, parseOverrideText, agentRevision, resolveContextBudget } from '../core/index.js';
 import type { AgentDefinition } from '../core/index.js';
 import { rolePresentation } from '../core/presentation.js';
-import { setupRoleIds, setupRoute, recommendRole, setupResources, normalizeSetupStrategy, setupStrategyRoutes, recommendStrategyRole } from './setup.js';
+import { setupRoleIds, setupRoute, recommendRole, setupResources, normalizeSetupStrategy, setupStrategyRoutes, recommendStrategyRole, applyDefinitionActions } from './setup.js';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent';
 import { AgentDeckStore, textRevision } from './store.js';
 import { NativeDelegator, NativeDelegationFailure } from './native.js';
 import { SnapshotPresets } from './presets.js';
-import { currentSelection, delegationSelection, modelDeclarations, modelDirectory, modelView, sessionRoutes, routeAuthorization, supportsTextInput, ModelAuthorizationError } from './models.js';
+import { currentSelection, delegationSelection, explicitModelRoutes, modelDeclarations, modelDirectory, modelView, sessionRoutes, routeAuthorization, supportsTextInput, ModelAuthorizationError } from './models.js';
 import { missingCapabilities } from './capabilities.js';
 import { readRunResult } from './results.js';
 import { roleChoice } from './selection.js';
@@ -29,6 +29,63 @@ function admissionBudget(input: Parameters<typeof resolveContextBudget>[0]) {
   // Fixed prompt/tool cost is measured only after the real child scope assembles.
   const { materialTokens: _unmeasured, ...budget } = resolveContextBudget(input);
   return budget;
+}
+
+function collectImpacts(from: Map<string, AgentDefinition>, to: AgentDefinition[], target: Map<string, JsonObject>, afterId: string,
+  selected: ReadonlySet<string>, owners?: ReadonlyMap<string, string>, pending?: ReadonlyMap<string, JsonObject>): void {
+  const byId = new Map(to.map(role => [role.id, role]));
+  const inheritsFrom = (id: string): boolean => {
+    const seen = new Set<string>();
+    let parent = byId.get(id)?.extends;
+    while (parent && !seen.has(parent)) {
+      if (parent === afterId) return true;
+      seen.add(parent);
+      parent = byId.get(parent)?.extends;
+    }
+    return false;
+  };
+  const authors = (patch: JsonObject | undefined, resource: string): boolean => {
+    if (!patch) return false;
+    if (resource === 'model') {
+      const model = patch.model;
+      if (!model || typeof model !== 'object' || Array.isArray(model)) return false;
+      const mode = (model as JsonObject).mode;
+      return mode === 'fixed' ? typeof (model as JsonObject).provider === 'string' && typeof (model as JsonObject).model === 'string'
+        : mode === 'auto' ? Array.isArray((model as JsonObject).candidates) && typeof (model as JsonObject).defaultCandidate === 'string' : false;
+    }
+    if (resource === 'reasoning') {
+      const reasoning = patch.reasoning;
+      if (!reasoning || typeof reasoning !== 'object' || Array.isArray(reasoning)) return false;
+      return (reasoning as JsonObject).mode === 'model-default' || ((reasoning as JsonObject).mode === 'fixed' && typeof (reasoning as JsonObject).effort === 'string');
+    }
+    if (resource === 'context') {
+      const context = patch.context;
+      return !!context && typeof context === 'object' && !Array.isArray(context)
+        && typeof (context as JsonObject).targetTokens === 'number' && typeof (context as JsonObject).elasticTokens === 'number';
+    }
+    return Object.hasOwn(patch, resource);
+  };
+  for (const role of to) {
+    const previous = from.get(role.id);
+    const before = previous ? setupResources(previous) : null;
+    const resources = setupResources(role);
+    const changed = before ? (['model', 'reasoning', 'output', 'context'] as const).filter(key => digest([before[key]]) !== digest([resources[key]])) : [];
+    // A project-owned definition can share the ID without being edited by the batch.
+    // A selected row that explicitly authors every changed resource owns its direct result.
+    const selectedDirect = selected.has(role.id) && !owners?.has(role.id);
+    const directRowOwnsChange = changed.length > 0 && changed.every(key => authors(pending?.get(role.id), key));
+    if (selectedDirect && (role.id === afterId || !inheritsFrom(role.id) || role.schemaVersion === 1 || directRowOwnsChange)) continue;
+    if (before && digest(before) === digest(resources)) continue;
+    const impact = target.get(role.id) ?? { id: role.id, title: role.title, before, prefixes: [] };
+    impact.prefixes.push({ afterId, resources });
+    target.set(role.id, impact);
+  }
+}
+
+export class ChangeImpactError extends Error {
+  constructor(readonly code: 'AGENTDECK_IMPACT_PREVIEW_REQUIRED' | 'AGENTDECK_IMPACT_PREVIEW_CHANGED' | 'AGENTDECK_IMPACT_CONSENT_REQUIRED', message: string) {
+    super(message);
+  }
 }
 
 export class AgentDeckController {
@@ -100,15 +157,8 @@ export class AgentDeckController {
     const model = optionalString(request.model, 'model');
     if (model !== undefined && provider === undefined) throw new Error('A model metadata query requires its provider.');
     if (request.view === 'setup-options') {
-      if (provider !== undefined) throw new Error('Setup model options do not accept a provider filter.');
-      const directory = await modelDirectory(this.ctx, agent, undefined, signal, false, true);
-      if (directory.diagnostics.length) throw new Error(directory.diagnostics.join('\n'));
-      const explicitRoutes = (directory.models as JsonObject[]).map(model => ({
-        provider: model.provider, model: model.id,
-        ...(model.metadataResolved !== true ? { generatorUnavailable: 'metadata' }
-          : !supportsTextInput(model) ? { generatorUnavailable: 'non-text' } : {}),
-      }));
-      return { ...directory, models: [], explicitRoutes };
+      if (model !== undefined) throw new Error('Setup model options do not resolve exact model metadata.');
+      return modelDirectory(this.ctx, undefined, provider ? { provider } : undefined, signal, true);
     }
     if (request.view !== undefined && request.view !== 'options') throw new Error('Unknown model directory view.');
     const result = await modelDirectory(this.ctx, agent, provider ? { provider, ...(model ? { model } : {}) } : undefined, signal, request.view === 'options');
@@ -242,11 +292,9 @@ export class AgentDeckController {
     const ids = setupRoleIds(request.roleIds);
     const policy = this.setupPolicy({ scopePolicy: request.scopePolicy ?? 'fill-unconfigured' });
     const migrations = this.setupMigrations(request, ids);
-    if (!actor) throw new Error('An active Session is required to generate an AI setup proposal.');
     const parent = delegationSelection(actor);
-    if (!parent?.provider || !parent.model) throw new Error('The active Session model is unavailable for AI setup proposal generation.');
     const generatorRoute = request.generatorRoute === undefined
-      ? { provider: parent.provider, model: parent.model }
+      ? parent?.provider && parent.model ? setupRoute(parent) : undefined
       : setupRoute(request.generatorRoute);
     if (request.includeBrowser !== undefined && typeof request.includeBrowser !== 'boolean') throw new Error('includeBrowser must be boolean.');
     const current = await this.resolved(actor);
@@ -270,42 +318,71 @@ export class AgentDeckController {
     if (browserOverride) for (const role of includedRoles.filter(isBrowser)) strategies.set(role.id, browserOverride);
     const routeSnapshot = { routes: await sessionRoutes(this.ctx, actor, signal) };
     signal.throwIfAborted();
-    const strategyRoutes = (strategy: JsonObject) => strategy.mode === 'inherit' ? [setupRoute(parent)] : setupStrategyRoutes(strategy);
-    if (browserOverride && !proposedRoles.length) {
-      const routes = strategyRoutes(browserOverride);
-      const exact = await modelDeclarations(this.ctx, routes, actor, signal, routeSnapshot);
-      for (const route of routes) {
-        const model = exact.find(value => value.provider === route.provider && value.id === route.model);
-        if (!model || model.metadataResolved !== true || model.authorized !== true) throw new Error('AI setup proposal selected an unavailable or unauthorized model: ' + route.provider + '/' + route.model + '.');
-        if (!supportsTextInput(model)) throw new Error('AI setup candidate ' + route.provider + '/' + route.model + ' does not support text input.');
-      }
-      return this.recommendStrategy(request, actor, signal, { strategies, revisions, models: exact });
-    }
-    const generatorLabel = generatorRoute.provider + '/' + generatorRoute.model;
-    const authorization = routeAuthorization(generatorRoute, parent, routeSnapshot.routes, true, true);
-    if (authorization.status === 'denied') {
-      const routes = authorization.allowedModels as { provider: string; model: string }[];
-      const allowed = routes.slice(0, 8).map(route => route.provider + '/' + route.model).join(', ') || '(none)';
-      throw new Error(`AI setup generator ${generatorLabel} is not authorized by the selected Session. Allowed models: ${allowed}${routes.length > 8 ? ' (more in Session policy)' : ''}. Select an allowed model or open a Session that authorizes this model.`);
-    }
-    const directory = await modelDirectory(this.ctx, actor, undefined, signal, false, true, routeSnapshot);
-    signal.throwIfAborted();
-    const directoryModels = directory.models as JsonObject[];
-    const models = directoryModels.filter(model => model.metadataResolved === true && model.authorized === true);
-    const generator = models.find(model => model.provider === generatorRoute.provider && model.id === generatorRoute.model);
-    const allowed = new Map(models.map(model => [JSON.stringify([model.provider, model.id]), model]));
-    const checkRoutes = (strategy: JsonObject) => {
+    const strategyRoutes = (strategy: JsonObject) => strategy.mode === 'inherit' && parent?.provider && parent.model
+      ? [setupRoute(parent)] : setupStrategyRoutes(strategy);
+    const routeKey = (provider: string, model: string) => JSON.stringify([provider, model]);
+    const byRoute = (models: JsonObject[]) => new Map(models.map(model => [routeKey(model.provider, model.id), model]));
+    const usable = (models: JsonObject[]) => models.filter(model => model.metadataResolved === true && (!actor || model.authorized === true));
+    const checkRoutes = (strategy: JsonObject, models: Map<string, JsonObject>) => {
       for (const route of strategyRoutes(strategy)) {
-        const model = allowed.get(JSON.stringify([route.provider, route.model]));
+        const model = models.get(routeKey(route.provider, route.model));
         if (!model) throw new Error('AI setup proposal selected an unavailable or unauthorized model: ' + route.provider + '/' + route.model + '.');
         if (!supportsTextInput(model)) throw new Error('AI setup candidate ' + route.provider + '/' + route.model + ' does not support text input.');
       }
     };
-    if (browserOverride) checkRoutes(browserOverride);
-    if (!generator) throw new Error('AI setup generator ' + generatorLabel + ' is authorized by the selected Session, but its model metadata could not be resolved. Verify that the provider still offers this model, or choose another authorized model.');
-    if (!supportsTextInput(generator)) {
-      throw new Error(`AI setup generator ${generatorLabel} does not support text input. Choose a text-capable generator.`);
+    if (browserOverride && !proposedRoles.length) {
+      const exact = await modelDeclarations(this.ctx, strategyRoutes(browserOverride), actor, signal, routeSnapshot);
+      checkRoutes(browserOverride, byRoute(usable(exact)));
+      return this.recommendStrategy(request, actor, signal, { strategies, revisions, models: exact });
     }
+    if (!generatorRoute) throw new Error('Select a provider and model to generate an AI setup proposal.');
+    const generatorLabel = generatorRoute.provider + '/' + generatorRoute.model;
+    // Resolve the exact owner-selected generator before enumerating any unrelated provider.
+    // Session policy governs proposed role routes, while the generator is an independent route.
+    const generator = (await modelDeclarations(this.ctx, [generatorRoute], undefined, signal))[0];
+    if (!generator?.metadataResolved) {
+      throw new Error('AI setup proposal generation failed for ' + generatorLabel + ': ' + (generator?.error ?? 'Model metadata could not be resolved.'));
+    }
+    let candidateModels: JsonObject[];
+    let directoryDiagnostics: string[] = [];
+    if (actor) {
+      const allowedRoutes = explicitModelRoutes(parent, routeSnapshot.routes).filter(route => route.provider !== generatorRoute.provider || route.model !== generatorRoute.model);
+      candidateModels = await modelDeclarations(this.ctx, allowedRoutes, actor, signal, routeSnapshot);
+    } else {
+      const directory = await modelDirectory(this.ctx, actor, undefined, signal, false, false, routeSnapshot);
+      candidateModels = directory.models;
+      directoryDiagnostics = directory.diagnostics;
+    }
+    signal.throwIfAborted();
+    const declarations = byRoute(candidateModels);
+    const generatorKey = routeKey(generatorRoute.provider, generatorRoute.model);
+    const listedGenerator = declarations.get(generatorKey);
+    const generatorAuthorized = actor ? explicitModelRoutes(parent, routeSnapshot.routes).some(route => route.provider === generatorRoute.provider && route.model === generatorRoute.model) : listedGenerator?.authorized;
+    declarations.set(generatorKey, { ...generator, ...(generatorAuthorized !== undefined ? { authorized: generatorAuthorized } : {}) });
+    if (actor) {
+      const ordered = new Map<string, JsonObject>();
+      for (const route of explicitModelRoutes(parent, routeSnapshot.routes)) {
+        const key = routeKey(route.provider, route.model);
+        const model = declarations.get(key);
+        if (model) ordered.set(key, model);
+      }
+      for (const [key, model] of declarations) ordered.set(key, model);
+      declarations.clear();
+      for (const [key, model] of ordered) declarations.set(key, model);
+    }
+    if (!supportsTextInput(generator)) {
+      throw new Error('AI setup generator ' + generatorLabel + ' does not support text input. Choose a text-capable generator.');
+    }
+    if (!actor) {
+      // A provider can accept a custom model that does not appear in its catalog.
+      declarations.set(generatorKey, generator);
+      const extra = browserOverride ? strategyRoutes(browserOverride).filter(route => !declarations.has(routeKey(route.provider, route.model))) : [];
+      for (const model of await modelDeclarations(this.ctx, extra, undefined, signal)) declarations.set(routeKey(model.provider, model.id), model);
+    }
+    const directoryModels = [...declarations.values()];
+    const models = usable(directoryModels);
+    const allowed = byRoute(models);
+    if (browserOverride) checkRoutes(browserOverride, allowed);
     const modelChoices = models.filter(supportsTextInput).map(model => ({
       provider: model.provider, model: model.id, name: model.name,
       contextWindow: model.contextWindow, defaultMaxTokens: model.defaultMaxTokens,
@@ -324,7 +401,8 @@ export class AgentDeckController {
         candidate: 'Use exactly the keys in the example. Copy provider and model from an allowed route, use reasoning.mode "model-default", and choose a positive integer maxTokens appropriate for the model.',
         example: { strategies: { [proposedRoles[0].id]: {
           mode: 'auto', defaultCandidate: 'primary', candidates: [{
-            id: 'primary', purpose: 'Perform the role’s primary task.', ...generatorRoute,
+            id: 'primary', purpose: 'Perform the role’s primary task.',
+            provider: modelChoices[0]?.provider ?? generatorRoute.provider, model: modelChoices[0]?.model ?? generatorRoute.model,
             reasoning: { mode: 'model-default' }, maxTokens: 1024,
           }],
         } } },
@@ -374,12 +452,12 @@ export class AgentDeckController {
       }
     } catch (error) {
       signal.throwIfAborted();
-      throw new Error('AI setup proposal generation failed: ' + messageOf(error));
+      throw new Error('AI setup proposal generation failed for ' + generatorLabel + ': ' + messageOf(error));
     }
     signal.throwIfAborted();
     const reason = finish?.reason;
     if (!finish) throw new Error('AI setup proposal generation ended without a terminal result.');
-    if (reason?.kind === 'error') throw new Error('AI setup proposal generation failed: ' + (reason.failure?.message ?? messageOf(reason.failure ?? reason)));
+    if (reason?.kind === 'error') throw new Error('AI setup proposal generation failed for ' + generatorLabel + ': ' + (reason.failure?.message ?? messageOf(reason.failure ?? reason)));
     if (reason?.kind === 'aborted') throw new Error('AI setup proposal generation was aborted.');
     if (reason?.kind === 'max-tokens') throw new Error('AI setup proposal reached the model output budget. Select fewer roles or a generator with a larger output budget and try again.');
     if (reason?.kind !== 'stop') throw new Error('AI setup proposal generation did not return a complete JSON proposal.');
@@ -402,14 +480,14 @@ export class AgentDeckController {
         if (!Object.hasOwn(byRole, role.id)) throw new Error('AI setup proposal is missing a strategy for ' + role.id + '.');
         const strategy = normalizeSetupStrategy(byRole[role.id]);
         if (strategy.mode !== 'auto') throw new Error('AI setup proposal strategy must use auto mode for ' + role.id + '.');
-        checkRoutes(strategy);
+        checkRoutes(strategy, allowed);
         strategies.set(role.id, strategy);
       } catch (error) {
         invalidStrategies.set(role.id, messageOf(error));
       }
     }
     const result = await this.recommendStrategy(request, actor, signal, { strategies, revisions, generatedRoleIds: roleIds, invalidStrategies, models: directoryModels });
-    return { ...result, proposalSource: 'ai', proposalGenerator: generatorRoute };
+    return { ...result, diagnostics: [...result.diagnostics, ...directoryDiagnostics.map(original => ({ code: 'setup.directoryIncomplete', message: 'Some candidate models could not be listed.', original }))], proposalSource: 'ai', proposalGenerator: generatorRoute };
   }
   private setupPolicy(value: unknown): { scopePolicy: 'fill-unconfigured' | 'replace-selected' } {
     const policy = object(value, 'setupPolicy');
@@ -488,7 +566,6 @@ export class AgentDeckController {
   }
   private async prepareSetup(request: JsonObject, actor?: RuntimeAgent, signal?: AbortSignal) {
     const policy = request.setupPolicy === undefined ? undefined : this.setupPolicy(request.setupPolicy);
-    if (!policy && (request.impactRevision !== undefined || request.acceptedIndirectRoles !== undefined)) throw new Error('Impact acceptance requires a setup policy.');
     const ids = setupRoleIds(Array.isArray(request.rows) ? request.rows.map(row => object(row).id) : undefined);
     const rows = (request.rows as unknown[]).map((value, index) => {
       const row = object(value); const text = requiredString(row.text, 'text', 1024 * 1024);
@@ -511,36 +588,24 @@ export class AgentDeckController {
     const baselineIssues = new Set(initial.diagnostics.map(issue => JSON.stringify(issue)));
     let proposed = baseline;
     const selected = new Set(rows.map(row => row.id));
+    const pending = new Map(rows.map(row => [row.id, parseOverrideText(row.text)]));
     const impacts = new Map<string, JsonObject>();
     const globalImpacts = new Map<string, JsonObject>();
     const roleMap = (roles: AgentDefinition[]) => new Map(roles.map(role => [role.id, role]));
     const globalOriginal = roleMap(baseline.global.agents);
     const otherProjects = [...baseline.projects].filter(([cwd]) => cwd !== state.currentProject)
       .map(([cwd, catalog]) => ({ cwd, before: roleMap(catalog.agents), owners: this.setupExternalSources(catalog.layers), impacts: new Map<string, JsonObject>() }));
-    const collectImpacts = (from: Map<string, AgentDefinition>, to: AgentDefinition[], target: Map<string, JsonObject>, afterId: string,
-      owners?: ReadonlyMap<string, string>) => {
-      for (const role of to) {
-        // A project-owned definition can share the ID without being edited by the batch.
-        if (selected.has(role.id) && !owners?.has(role.id)) continue;
-        const previous = from.get(role.id);
-        const before = previous ? setupResources(previous) : null;
-        const resources = setupResources(role);
-        if (before && digest(before) === digest(resources)) continue;
-        const impact = target.get(role.id) ?? { id: role.id, title: role.title, before, prefixes: [] };
-        impact.prefixes.push({ afterId, resources });
-        target.set(role.id, impact);
-      }
-    };
+
     for (const row of rows) {
       state = state.withWrite(row.id, row.text);
       proposed = state.catalogs();
       const issues = proposed.current.diagnostics.filter(issue => !baselineIssues.has(JSON.stringify(issue)));
       if (issues.length) throw new Error(issues.map(issue => issue.message).join('\n'));
       assertNoRoleLoss(baseline, proposed);
-      if (baseline.current !== baseline.global) collectImpacts(globalOriginal, proposed.global.agents, globalImpacts, row.id);
-      collectImpacts(original, proposed.current.agents, impacts, row.id);
+      if (baseline.current !== baseline.global) collectImpacts(globalOriginal, proposed.global.agents, globalImpacts, row.id, selected, undefined, pending);
+      collectImpacts(original, proposed.current.agents, impacts, row.id, selected, undefined, pending);
       for (const project of otherProjects) {
-        collectImpacts(project.before, proposed.projects.get(project.cwd)!.agents, project.impacts, row.id, project.owners);
+        collectImpacts(project.before, proposed.projects.get(project.cwd)!.agents, project.impacts, row.id, selected, project.owners, pending);
       }
       expected.push(state.fingerprint());
     }
@@ -588,47 +653,109 @@ export class AgentDeckController {
   }
   async applySetup(request: JsonObject, actor?: RuntimeAgent, signal?: AbortSignal): Promise<JsonObject> {
     const { rows, expected, policy, impacts, impactRevision } = await this.prepareSetup(request, actor, signal);
-    if (policy) {
-      if (request.impactRevision !== impactRevision) throw new Error('Setup impact preview changed or is missing. Preview the exact selection again.');
-      const accepted = request.acceptedIndirectRoles ?? [];
-      if (!Array.isArray(accepted) || accepted.some(id => typeof id !== 'string') || new Set(accepted).size !== accepted.length || accepted.some(id => !impacts.some(impact => impact.id === id))) throw new Error('Indirect role acceptance must match the current impact preview.');
-      if (impacts.some(impact => !accepted.includes(impact.id))) throw new Error('Confirm every indirect role impact, including intermediate saved prefixes, before applying.');
-    }
-    if (!policy && impacts.some(impact => impact.projects?.length)) throw new Error('Use strategy setup to review impacts in other projects before applying.');
-    // Recheck the same external inputs inside the serial boundary before each durable prefix.
+    this.acceptChange(request, { impacts, impactRevision }, Boolean(policy), 'Setup');
     // Apply may outlive the browser request once dispatch has reached the write boundary.
     return this.store.saveBatch(rows, async index => {
       if ((await this.configuration.forWrite(actor)).fingerprint() !== expected[index]) throw new Error('Agent configuration changed. Refresh and regenerate suggestions before continuing.');
     });
   }
-  async save(request: JsonObject, actor?: RuntimeAgent): Promise<JsonObject> {
+  private async prepareChange(request: JsonObject, actor?: RuntimeAgent, signal?: AbortSignal): Promise<JsonObject> {
+    const id = requiredString(request.id, 'id', 64);
+    const reset = request.reset === true;
+    const expectedRevision = optionalString(request.expectedRevision, 'expectedRevision');
+    const state = await this.configuration.forWrite(actor, signal);
+    const baseline = state.catalogs();
+    assertReadable(baseline);
+    const current = baseline.current;
+    const stored = this.store.getOverride(id);
+    const role = current.agents.find(agent => agent.id === id) ?? baseline.global.agents.find(agent => agent.id === id);
+    const actions = request.actions;
+    if (actions !== undefined && (!role || !Array.isArray(actions) || request.text !== undefined || reset)) throw new Error('Definition actions require an existing role, without raw text or reset.');
+    const text = reset ? undefined : Array.isArray(actions)
+      ? applyDefinitionActions(request.baseText === undefined ? stored?.text : requiredString(request.baseText, 'baseText', 1024 * 1024), role!, actions)
+      : requiredString(request.text, 'text', 1024 * 1024);
+    if (!reset && parseOverrideText(text!).id !== id) throw new Error('Submitted id must match the YAML role id.');
+    if (reset && (!stored || stored.revision !== expectedRevision)) throw new Error('Agent configuration changed. Reload before resetting.');
+    if (!reset && stored && stored.revision !== expectedRevision) throw new Error('Agent configuration changed. Reload it before saving; your draft has not been applied.');
+    if (!reset && !stored && expectedRevision) throw new Error('Agent override no longer exists. Reload before saving.');
+    const externalOwner = this.setupExternalSources(current.layers).get(id);
+    if (!reset && externalOwner) throw new Error(`This role is owned by ${externalOwner}. Edit that file or derive a new role id; a user override would be hidden by that source.`);
+    const candidate = state.withWrite(id, text).catalogs();
+    const issues = candidate.current.diagnostics.filter(issue => issue.id === id || issue.source === `user:${id}`);
+    if (!reset && (issues.length || !candidate.current.agents.some(role => role.id === id))) {
+      throw new Error(issues.map(issue => issue.message).join('\n') || 'Invalid role definition.');
+    }
+    assertNoRoleLoss(baseline, candidate, reset ? id : undefined);
+    const roleMap = (roles: AgentDefinition[]) => new Map(roles.map(role => [role.id, role]));
+    const impacts = new Map<string, JsonObject>();
+    const globalImpacts = new Map<string, JsonObject>();
+    const globalOriginal = roleMap(baseline.global.agents);
+    const otherProjects = [...baseline.projects].filter(([cwd]) => cwd !== state.currentProject)
+      .map(([cwd, catalog]) => ({ cwd, before: roleMap(catalog.agents), owners: this.setupExternalSources(catalog.layers), impacts: new Map<string, JsonObject>() }));
+
+    const selected = new Set([id]);
+    if (baseline.current !== baseline.global) collectImpacts(globalOriginal, candidate.global.agents, globalImpacts, id, selected);
+    collectImpacts(roleMap(current.agents), candidate.current.agents, impacts, id, selected);
+    for (const project of otherProjects) collectImpacts(project.before, candidate.projects.get(project.cwd)!.agents, project.impacts, id, selected, project.owners);
+    const finish = (target: Map<string, JsonObject>, roles: AgentDefinition[]) => {
+      const final = new Map(roles.map(role => [role.id, role]));
+      for (const impact of target.values()) impact.after = final.has(impact.id) ? setupResources(final.get(impact.id)!) : null;
+    };
+    finish(impacts, candidate.current.agents);
+    if (baseline.current === baseline.global) for (const impact of impacts.values()) impact.scope = 'global';
+    finish(globalImpacts, candidate.global.agents);
+    for (const [impactId, impact] of globalImpacts) {
+      const project = impacts.get(impactId);
+      if (!project) impacts.set(impactId, { ...impact, scope: 'global' });
+      else if (digest([project.before, project.after, project.prefixes]) !== digest([impact.before, impact.after, impact.prefixes])) project.global = { before: impact.before, after: impact.after, prefixes: impact.prefixes };
+    }
+    const impactKey = (impact: JsonObject) => digest([impact.before, impact.after, impact.prefixes]);
+    for (const project of otherProjects) {
+      finish(project.impacts, candidate.projects.get(project.cwd)!.agents);
+      for (const [impactId, impact] of project.impacts) {
+        const global = baseline.current === baseline.global ? impacts.get(impactId) : globalImpacts.get(impactId);
+        if (global && global.scope !== 'projects' && impactKey(global) === impactKey(impact)) continue;
+        const entry = impacts.get(impactId) ?? { ...impact, scope: 'projects' };
+        (entry.projects ??= []).push({ cwd: project.cwd, before: impact.before, after: impact.after, prefixes: impact.prefixes });
+        impacts.set(impactId, entry);
+      }
+    }
+    const impactList = [...impacts.values()].sort((a, b) => a.id.localeCompare(b.id));
+    const configRevision = state.fingerprint();
+    const impactRevision = digest({ operation: reset ? 'reset' : 'save', id, text, expectedRevision, configRevision, actor: actor?.id, impacts: impactList });
+    const after = candidate.current.agents.find(agent => agent.id === id);
+    return { id, ...(text === undefined ? { reset: true } : { text }), ...(expectedRevision ? { expectedRevision } : {}),
+      direct: { before: role ?? null, after: after ?? null }, diagnostics: issues,
+      currentText: stored?.text ?? null, impacts: impactList, impactRevision, configRevision };
+  }
+  private acceptChange(request: JsonObject, prepared: JsonObject, requirePreview = false, label = 'Change'): void {
+    const revision = optionalString(request.impactRevision, 'impactRevision');
+    const accepted = request.acceptedIndirectRoles ?? [];
+    if (revision === undefined) {
+      if (requirePreview || prepared.impacts.length) throw new ChangeImpactError('AGENTDECK_IMPACT_PREVIEW_REQUIRED', `${label} impact preview is required before saving changes.`);
+      return;
+    }
+    if (revision !== prepared.impactRevision) throw new ChangeImpactError('AGENTDECK_IMPACT_PREVIEW_CHANGED', `${label} impact preview changed or is missing. Preview the exact selection again.`);
+    if (!Array.isArray(accepted) || accepted.some(id => typeof id !== 'string') || new Set(accepted).size !== accepted.length || accepted.some(id => !prepared.impacts.some((impact: JsonObject) => impact.id === id)) ) throw new ChangeImpactError('AGENTDECK_IMPACT_CONSENT_REQUIRED', 'Indirect role acceptance must match the current impact preview.');
+    if (prepared.impacts.some((impact: JsonObject) => !accepted.includes(impact.id))) throw new ChangeImpactError('AGENTDECK_IMPACT_CONSENT_REQUIRED', 'Confirm every indirect role impact before applying.');
+  }
+  async previewChange(request: JsonObject, actor?: RuntimeAgent, signal?: AbortSignal): Promise<JsonObject> {
+    return this.prepareChange(request, actor, signal);
+  }
+  async save(request: JsonObject, actor?: RuntimeAgent, signal?: AbortSignal): Promise<JsonObject> {
     const id = requiredString(request.id, 'id', 64);
     const text = requiredString(request.text, 'text', 1024 * 1024);
     const parsed = parseOverrideText(text);
     if (parsed.id !== id) throw new Error('Submitted id must match the YAML role id.');
     return this.store.save(id, text, optionalString(request.expectedRevision, 'expectedRevision'), async () => {
-      const state = await this.configuration.forWrite(actor);
-      const current = state.catalogs();
-      assertReadable(current);
-      const externalOwner = this.setupExternalSources(current.current.layers).get(id);
-      if (externalOwner) throw new Error(`This role is owned by ${externalOwner}. Edit that file or derive a new role id; a user override would be hidden by that source.`);
-      const candidate = state.withWrite(id, text).catalogs();
-      // New roles may derive from a project-only parent. Existing roles,
-      // including the edited role, must stay valid wherever they already resolve.
-      const issues = candidate.current.diagnostics.filter(issue => issue.id === id || issue.source === `user:${id}`);
-      if (issues.length || !candidate.current.agents.some(role => role.id === id)) {
-        throw new Error(issues.map(issue => issue.message).join('\n') || 'Invalid role definition.');
-      }
-      assertNoRoleLoss(current, candidate);
+      this.acceptChange(request, await this.prepareChange({ ...request, reset: false }, actor, signal));
     });
   }
-  async reset(request: JsonObject, actor?: RuntimeAgent): Promise<JsonObject> {
+  async reset(request: JsonObject, actor?: RuntimeAgent, signal?: AbortSignal): Promise<JsonObject> {
     const id = requiredString(request.id, 'id', 64);
-    await this.store.reset(id, requiredString(request.expectedRevision, 'expectedRevision'), async () => {
-      const state = await this.configuration.forWrite(actor);
-      const current = state.catalogs();
-      assertReadable(current);
-      assertNoRoleLoss(current, state.withWrite(id).catalogs(), id);
+    const expectedRevision = requiredString(request.expectedRevision, 'expectedRevision');
+    await this.store.reset(id, expectedRevision, async () => {
+      this.acceptChange(request, await this.prepareChange({ ...request, reset: true }, actor, signal));
     });
     return { id, reset: true };
   }
@@ -771,15 +898,16 @@ export class AgentDeckController {
     await this.store.run(repaired);
     return repaired;
   }
-  async runs(actor?: RuntimeAgent, signal?: AbortSignal): Promise<JsonObject> {
+  async runs(actor?: RuntimeAgent, signal?: AbortSignal, parentId?: string): Promise<JsonObject> {
+    const recorded = this.store.runs().filter(run => !actor || run.parentId === actor.id);
     const runs = [];
-    for (const saved of this.store.runs().filter(run => !actor || run.parentId === actor.id).slice(0, 200)) {
+    for (const saved of recorded.filter(run => !parentId || run.parentId === parentId).slice(0, 200)) {
       let run = saved;
       try { run = await this.reconcile(saved, signal); }
       catch (error) { signal?.throwIfAborted(); run = { ...saved, error: `${saved.error ?? ''} Reconciliation: ${messageOf(error)}`.trim() }; }
       runs.push({ ...run, ...(run.childId ? { nativeStatus: this.ctx.agents.get(run.childId as any)?.status ?? 'not-resident' } : {}) });
     }
-    return { runs };
+    return { runs, parentIds: [...new Set(recorded.map(run => run.parentId))] };
   }
   async operation(name: string, payload: unknown, actor?: RuntimeAgent, signal = new AbortController().signal): Promise<JsonObject> {
     const request = object(payload ?? {});
@@ -791,9 +919,11 @@ export class AgentDeckController {
       case 'recommend': return this.recommend(request, actor, signal);
       case 'previewSetup': return this.previewSetup(request, actor, signal);
       case 'applySetup': return this.applySetup(request, actor, signal);
-      case 'save': return this.save(request, actor);
-      case 'reset': return this.reset(request, actor);
-      case 'runs': return this.runs(actor, signal);
+      case 'inspectDefinition': return { id: parseOverrideText(requiredString(request.text, 'text', 1024 * 1024)).id };
+      case 'previewChange': return this.previewChange(request, actor, signal);
+      case 'save': return this.save(request, actor, signal);
+      case 'reset': return this.reset(request, actor, signal);
+      case 'runs': return this.runs(actor, signal, optionalString(request.parentId, 'parentId'));
       case 'result': return this.result(request, actor, signal);
       default: throw new Error(`Unknown AgentDeck operation ${name}`);
     }

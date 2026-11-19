@@ -139,18 +139,20 @@ test('explicit public native RPC getter retains the consumer scope through Cordi
   } finally { await binding?.dispose(); await f.close(); }
 });
 
-test('AI setup goes through the Client, authenticated RPC and the native LLM stream', async () => {
+test('AI setup without a Session goes through the Client, authenticated RPC and the native LLM stream', async () => {
   const f = await fixture();
   let controller;
   try {
     const plugin = await clientPlugin();
     controller = plugin.createController({ rpc: f.rpc });
-    controller.setSession(f.h.parent.id);
     value(await controller.loadCatalog());
     controller.openSetup();
     value(await controller.loadSetupModels());
     const generatorRoute = { provider: ROUTE.provider, model: ROUTE.model };
-    assert.deepEqual({ ...controller.getSnapshot().setupOptions.proposalGenerator }, generatorRoute);
+    assert.ok(controller.setupModelOptionsState().items.some(provider => provider.id === ROUTE.provider));
+    controller.updateSetup({ proposalGenerator: generatorRoute });
+    value(await controller.loadSetupModels());
+    assert.ok(controller.setupModelOptionsState(ROUTE.provider).items.some(model => model.id === ROUTE.model));
     assert.equal(f.h.adapter.requests.length, 0);
     f.h.adapter.setupReply = JSON.stringify({ strategies: { reader: { mode: 'auto', defaultCandidate: 'local', candidates: [
       { id: 'local', purpose: 'Read sources.', ...generatorRoute, reasoning: { mode: 'model-default' }, maxTokens: 1024 },
@@ -159,6 +161,7 @@ test('AI setup goes through the Client, authenticated RPC and the native LLM str
     const result = value(await controller.recommendSetup());
     assert.equal(result.proposalSource, 'ai');
     assert.equal(result.rows[0].after.model.defaultCandidate, 'local');
+    assert.ok(result.rows[0].warnings.some(warning => warning.code === 'setup.authorizationUnknown'));
     assert.equal(f.h.adapter.requests.length, 1);
     const [message] = f.h.adapter.requests[0].messages;
     assert.equal(message.role, 'user');
@@ -232,6 +235,8 @@ test('actual Client controller reads and saves/resets isolated definitions over 
     value(await controller.loadRuns());
     assert.equal(controller.getSnapshot().preview.effectiveSelection.maxTokens, 1536);
     assert.equal(controller.getSnapshot().runs.length, 0);
+    controller.setSession('');
+    value(await controller.loadCatalog());
     controller.beginCreate('reader');
     controller.setNewId('rpc-fixture-reader');
     const created = value(await controller.save('@new'));
@@ -255,6 +260,36 @@ test('actual Client controller reads and saves/resets isolated definitions over 
     assert.equal(f.h.starts.length, 0);
     assert.equal(f.h.adapter.requests.length, 0, 'metadata and configuration RPC must not generate a model response');
   } finally { controller?.dispose(); await f.close(); }
+});
+
+test('owner RPC rejects unreviewed or stale single and legacy batch changes with typed errors', async () => {
+  const f = await fixture();
+  try {
+    const call = (method, payload) => f.rpc.call('/agentdeck', 'agentdeck.' + method, payload);
+    const dependent = 'rpc-legacy-dependent';
+    value(await call('save', { id: dependent, text: JSON.stringify({ schemaVersion: 1, id: dependent, extends: 'reader' }) }));
+    const catalog = value(await call('catalog', {}));
+    const text = JSON.stringify({ schemaVersion: 1, id: 'reader', context: { targetTokens: 2000, elasticTokens: 4000 } });
+    const change = { id: 'reader', text };
+    const rows = [{ ...change, roleRevision: catalog.agents.find(role => role.id === 'reader').revision }];
+    const preview = value(await call('previewChange', change));
+    const batch = value(await call('previewSetup', { rows }));
+    assert.deepEqual(preview.impacts, batch.impacts);
+    assert.deepEqual(preview.impacts.map(role => role.id), [dependent]);
+    for (const [method, payload, code] of [
+      ['save', change, 'PREVIEW_REQUIRED'],
+      ['save', { ...change, impactRevision: 'old', acceptedIndirectRoles: [dependent] }, 'PREVIEW_CHANGED'],
+      ['applySetup', { rows }, 'PREVIEW_REQUIRED'],
+      ['applySetup', { rows, impactRevision: batch.impactRevision }, 'CONSENT_REQUIRED'],
+    ]) {
+      const refused = await call(method, payload);
+      assert.equal(refused.ok, false);
+      assert.equal(refused.error.code, 'AGENTDECK_IMPACT_' + code);
+    }
+    assert.equal(value(await call('catalog', {})).overrides.length, 1);
+    const applied = value(await call('applySetup', { rows, impactRevision: batch.impactRevision, acceptedIndirectRoles: [dependent] }));
+    assert.equal(applied.status, 'completed');
+  } finally { await f.close(); }
 });
 
 for (const derivedId of ['rpc-derived-reader', 'constructor'])

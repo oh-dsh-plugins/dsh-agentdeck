@@ -25,6 +25,31 @@ export function setupRoleIds(value: unknown): string[] {
 }
 export const setupResources = (role: AgentDefinition) => ({ model: role.model, reasoning: role.reasoning, ...(role.output ? { output: role.output } : {}), context: role.context });
 
+export function applyDefinitionActions(baseText: string | undefined, role: Pick<AgentDefinition, 'schemaVersion' | 'id'>, actions: JsonObject[]): string {
+  if (!Array.isArray(actions) || actions.length > 64) throw new Error('Definition edit actions must be an array of at most 64 items.');
+  if (baseText !== undefined) parseOverrideText(baseText);
+  const doc = parseDocument(baseText ?? JSON.stringify({ schemaVersion: role.schemaVersion, id: role.id }));
+  for (const value of actions) {
+    const action = object(value, 'definition action');
+    const path = action.path;
+    if (!Array.isArray(path) || !((path.length === 1 && ['schemaVersion', 'enabled', 'model', 'reasoning', 'output', 'context'].includes(path[0])) || (path.length === 2 && path[0] === 'context' && ['targetTokens', 'elasticTokens'].includes(path[1])))) throw new Error('Unsupported definition edit path.');
+    const operation = action.op;
+    if (operation === 'set') {
+      if (!Object.hasOwn(action, 'value')) throw new Error('Definition set actions require a value.');
+      doc.setIn(path, action.value);
+    } else if (operation === 'delete') {
+      doc.deleteIn(path);
+    } else if (operation === 'clear-output' && path.length === 1 && path[0] === 'output') {
+      doc.set('output', null);
+    } else {
+      throw new Error('Unknown definition edit action.');
+    }
+  }
+  const text = doc.toString();
+  parseOverrideText(text);
+  return text;
+}
+
 // Use the same complete-definition validator as saved roles, including candidate limits.
 const strategyTemplate = {
   schemaVersion: 2, id: 'setup', title: { en: 'Setup', zh: 'Setup' },

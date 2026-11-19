@@ -2,6 +2,13 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.2.11 — AgentDeck management and write recovery
+
+- Separate the role details, quick setup and run-history Session controls. Preserve proposals while inspecting roles, and require a fresh preview when the setup scope changes.
+- Save sparse YAML overrides without flattening inherited settings. Preview indirect effects across known projects and require confirmation before affected writes, including intermediate effects in a batch.
+- Read back uncertain saves, resets and batch rows before reporting that they landed. Keep unverified run results distinct from observed outcomes.
+- Bound model directory lookups and preserve legacy derived roles when they inherit version 2 resources.
+
 ## 0.2.10 — Model picker and cross-project setup fixes
 
 - Load authorized model choices before a role is selected. Preserve the selected generator, proposal and preview through temporary metadata failures.

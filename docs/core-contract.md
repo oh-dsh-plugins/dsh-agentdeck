@@ -26,7 +26,7 @@ Core modules use Node standard APIs and the declared YAML dependency, without DS
 
 id is required. Existing factory ids override factory values; new ids use extends or provide a complete definition. instructions accepts string or { append?: string; replace?: string }. capabilities/skills/scripts accept arrays (explicit replace) or { add?: string[]; remove?: string[]; replace?: string[] }. Other definition fields are validated shallow partial overrides and then resolved to a complete AgentDefinition. displayName string is accepted as a convenience alias for both title locales. Unknown fields are errors. Broken overrides must not silently fall back to a different role under the same id; disable/remove that resolved role and emit diagnostics. Other roles remain usable.
 
-Version 1 reads and revision hashes remain unchanged; no automatic rewrite is performed. New fields require version 2. Mode changes clear incompatible inherited route/candidate fields; candidate arrays replace the whole pool rather than merging by position. An override output:null clears the optional output cap. Historical execution snapshots retain their original normalized role and selected native parameters.
+Authored version 1 overrides still use the version 1 field set. When a merged definition retains a version 2 resource from its parent or lower layer, the effective definition uses version 2. Catalog resolution leaves authored YAML intact. Mode changes clear incompatible inherited route/candidate fields; candidate arrays replace the whole pool rather than merging by position. An override output:null clears the optional output cap. Historical execution snapshots retain their original normalized role and selected native parameters.
 
 ## Factory role ids
 

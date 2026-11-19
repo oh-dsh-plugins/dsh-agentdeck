@@ -67,7 +67,9 @@ type ModelAuthorization = (provider: string, model: string) => boolean | null;
 const METADATA_CONCURRENCY = 8;
 // Keep the picker inside its RPC timeout even when an adapter ignores cancellation.
 const METADATA_DEADLINE_MS = 4_000;
+const MODEL_DIRECTORY_DEADLINE_MS = 4_000;
 const METADATA_TIMEOUT = 'Model metadata did not resolve before the lookup deadline. Retry to check the declaration again.';
+const DIRECTORY_TIMEOUT = 'Model directory did not resolve before the lookup deadline. Retry to check the provider declaration again.';
 
 async function resolveModelRows(ctx: HostContext, entries: ModelEntry[], allowed: ModelAuthorization,
   signal?: AbortSignal, optionsOnly = false): Promise<JsonObject[]> {
@@ -150,11 +152,44 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
   const diagnostics: string[] = [];
   const rows = new Map<string, any>();
   const exact = query?.model ? { provider: query.provider, model: query.model } : undefined;
-  if (!exact && !authorizedRoutesOnly) await Promise.all(providers.filter((provider: any) => !query || provider.id === query.provider).map(async (provider: any) => {
+  if (!exact && !authorizedRoutesOnly) {
+    const deadline = new AbortController();
+    const lookup = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+    let stop!: () => void;
+    const stopped = new Promise<void>(resolve => { stop = resolve; });
+    lookup.addEventListener('abort', stop, { once: true });
+    const timer = setTimeout(() => deadline.abort(), MODEL_DIRECTORY_DEADLINE_MS);
+    const pendingProviders = new Set<string>();
+    const listProvider = async (provider: any) => {
+      pendingProviders.add(provider.id);
+      let cancel!: () => void;
+      const cancelled = new Promise<undefined>(resolve => { cancel = () => resolve(undefined); });
+      const list = Promise.resolve().then(() => llm.listModels(provider.id));
+      // The native signature has no AbortSignal. Observe late rejection without
+      // allowing it to keep this request alive or mutate the returned directory.
+      list.catch(() => undefined);
+      lookup.addEventListener('abort', cancel, { once: true });
+      try {
+        const entries = await Promise.race([list, cancelled]);
+        if (!entries || lookup.aborted) return;
+        for (const entry of entries) rows.set(`${provider.id}\0${entry.id}`, entry);
+      } catch (error) {
+        if (!lookup.aborted) diagnostics.push(`${provider.id}: ${messageOf(error)}`);
+      } finally {
+        if (!lookup.aborted) pendingProviders.delete(provider.id);
+        lookup.removeEventListener('abort', cancel);
+      }
+    };
+    const selected = providers.filter((provider: any) => !query || provider.id === query.provider);
     try {
-      for (const entry of await llm.listModels(provider.id)) rows.set(`${provider.id}\0${entry.id}`, entry);
-    } catch (error) { diagnostics.push(`${provider.id}: ${messageOf(error)}`); }
-  }));
+      await Promise.race([Promise.all(selected.map(listProvider)), stopped]);
+      signal?.throwIfAborted();
+      if (deadline.signal.aborted) for (const id of pendingProviders) diagnostics.push(`${id}: ${DIRECTORY_TIMEOUT}`);
+    } finally {
+      clearTimeout(timer);
+      lookup.removeEventListener('abort', stop);
+    }
+  }
   const routeRows = authorizedRoutesOnly
     ? explicitRoutes
     : [...(routes ?? []), ...(selection ? [{ provider: selection.provider, model: selection.model }] : []), ...(inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : [])];

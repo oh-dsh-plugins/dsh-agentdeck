@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
-import { agentRevision, loadBuiltinAgents, resolveCatalog } from '../lib/core/index.js';
+import { parse } from 'yaml';
+import { agentRevision, loadBuiltinAgents, parseOverrideText, resolveCatalog } from '../lib/core/index.js';
+import { applyDefinitionActions } from '../lib/host/setup.js';
 
 let registration;
 vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
@@ -30,12 +32,17 @@ function fixture(extra = []) {
   };
   const controller = plugin.createController({ rpc: { async call(_channel, endpoint, payload) {
     if (endpoint === 'agentdeck.catalog') return { ok: true, value: catalog() };
-    assert.equal(endpoint, 'agentdeck.save');
-    const proposed = new Map(rows).set(payload.id, payload.text);
+    if (endpoint === 'agentdeck.inspectDefinition') return { ok: true, value: { id: parseOverrideText(payload.text).id } };
+    assert.ok(['agentdeck.previewChange', 'agentdeck.save'].includes(endpoint));
+    const before = catalog().agents.find(role => role.id === payload.id);
+    const text = payload.actions ? applyDefinitionActions(rows.get(payload.id), before, payload.actions) : payload.text;
+    const proposed = new Map(rows).set(payload.id, text);
     const resolved = resolveCatalog([...proposed].map(([id, text]) => ({ source: id, text })));
     const failure = resolved.diagnostics.find(item => item.id === payload.id);
     if (failure) return { ok: false, error: { code: 'invalidDefinition', message: failure.message } };
-    rows.set(payload.id, payload.text);
+    if (endpoint === 'agentdeck.previewChange') return { ok: true, value: { id: payload.id, text, impacts: [], impactRevision: 'test-preview', direct: { before, after: resolved.agents.find(role => role.id === payload.id) } } };
+    assert.equal(payload.impactRevision, 'test-preview');
+    rows.set(payload.id, text);
     revisions.set(payload.id, 'saved-' + ++sequence);
     return { ok: true, value: { id: payload.id, text: payload.text, revision: revisions.get(payload.id) } };
   } } });
@@ -68,7 +75,7 @@ test('switching the base updates the new draft schema without rewriting imported
     assert.equal((await controller.save('@new')).ok, true, controller.getSnapshot().errors.save?.message);
     assert.equal(controller.getSnapshot().catalog.agents.find(role => role.id === 'derived').schemaVersion, 2);
     const imported = JSON.stringify({ schemaVersion: 2, id: 'imported-role', extends: 'auto-base' });
-    controller.importText(imported);
+    await controller.importText(imported);
     controller.setNewBase('general');
     assert.equal(controller.getSnapshot().drafts['@new'].text, imported);
   } finally { controller.dispose(); }
@@ -85,7 +92,7 @@ test('clearing an inherited output cap remains cleared after later edits, save a
     const saved = controller.getSnapshot().catalog.agents.find(role => role.id === 'derived');
     assert.equal(saved.output, undefined, 'blank output must not re-inherit the base cap');
     assert.equal(saved.enabled, false);
-    assert.equal(JSON.parse(rows.get('derived')).output, null, 'override encodes an explicit inherited-cap clear');
+    assert.equal(parse(rows.get('derived')).output, null, 'override encodes an explicit inherited-cap clear');
     await controller.loadCatalog();
     assert.equal(controller.getSnapshot().drafts.derived.form.output, undefined);
     assert.equal(controller.getSnapshot().drafts.derived.text, controller.getSnapshot().drafts.derived.baseline);

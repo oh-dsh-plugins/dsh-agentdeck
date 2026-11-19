@@ -234,6 +234,54 @@ test('AI setup proposes from the active Session model and reuses preview/apply v
  } finally { await f.close(); }
 });
 
+test('setup model choices come from the configured provider without Session policy or exact metadata', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }]);
+  const llm = f.root.get('llm');
+  llm.listModels = async provider => {
+   f.calls.directory.push(provider);
+   return [{ provider, id: 'image-only', name: 'Image' }, { provider, id: 'free-choice', name: 'Free choice' }];
+  };
+  const providers = await f.controller.operation('models', { view: 'setup-options' });
+  assert.deepEqual(providers.providers.map(provider => provider.id), ['p', 'q']);
+  assert.deepEqual(providers.models, []);
+  const choices = await f.controller.operation('models', { view: 'setup-options', provider: 'q' }, f.actor);
+  assert.deepEqual(choices.models.map(({ provider, id, name }) => [provider, id, name]), [['q', 'image-only', 'Image'], ['q', 'free-choice', 'Free choice']]);
+  assert.deepEqual(f.calls.directory, ['q']);
+  assert.deepEqual(f.calls.metadata, []);
+  assert.equal(f.calls.observations, 0);
+ } finally { await f.close(); }
+});
+
+test('AI setup generates and previews from a configured model without a Session', async () => {
+ const f = await fixture(); try {
+  const generatorRoute = { provider: 'q', model: 'unlisted' };
+  f.root.get('llm').listModels = async provider => provider === 'p' ? [{ provider, id: 'm', name: 'M' }] : [];
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'], generatorRoute });
+  assert.deepEqual(proposal.proposalGenerator, generatorRoute);
+  assert.equal(proposal.rows[0].applicable, true);
+  assert.equal(proposal.rows[0].warnings.some(warning => warning.code === 'setup.authorizationUnknown'), true);
+  assert.equal(f.calls.stream[0].model, 'unlisted');
+  assert.equal(f.calls.observations, 0);
+  const preview = await f.controller.operation('previewSetup', strategyPayload(proposal));
+  assert.equal(preview.resources.reader.model.mode, 'auto');
+  assert.equal(f.store.getOverride('reader'), undefined);
+ } finally { await f.close(); }
+});
+
+test('AI setup generator can differ from a selected Session policy and reports native route failures', async () => {
+ const f = await fixture(); try {
+  f.allow([{ provider: 'p', model: 'm' }]);
+  const request = { roleIds: ['reader'], generatorRoute: { provider: 'q', model: 'custom' } };
+  const proposal = await f.controller.operation('recommend', request, f.actor);
+  assert.deepEqual(proposal.proposalGenerator, request.generatorRoute);
+  assert.equal(proposal.rows[0].applicable, true);
+  assert.equal(f.calls.stream[0].provider, 'q');
+  f.root.get('llm').stream = async () => { throw new Error('Provider rejected the model ID'); };
+  await assert.rejects(f.controller.operation('recommend', request, f.actor), /generation failed.*q\/custom.*Provider rejected the model ID/);
+ } finally { await f.close(); }
+});
+
 test('AI setup validates request options before querying models or generating', async () => {
  const f = await fixture(); try {
   const request = { roleIds: ['reader'] };
@@ -346,13 +394,10 @@ test('AI setup resolves only native allowed routes without enumerating provider 
  } finally { await f.close(); }
 });
 
-test('AI setup distinguishes Session denial from missing model metadata', async () => {
+test('AI setup reports missing metadata for the selected generator before streaming', async () => {
  const f = await fixture(); try {
-  const request = model => ({ roleIds: ['reader'], generatorRoute: { provider: 'p', model } });
-  await assert.rejects(f.controller.operation('recommend', request('denied'), f.actor), /p\/denied is not authorized by the selected Session.*p\/m/);
-  assert.deepEqual(f.calls.metadata, []);
-  f.allow([{ provider: 'p', model: 'missing' }]);
-  await assert.rejects(f.controller.operation('recommend', request('missing'), f.actor), /p\/missing is authorized.*metadata could not be resolved/);
+  const request = { roleIds: ['reader'], generatorRoute: { provider: 'q', model: 'missing' } };
+  await assert.rejects(f.controller.operation('recommend', request, f.actor), /generation failed for q\/missing: Unavailable declaration/);
   assert.deepEqual(f.calls.stream, []);
  } finally { await f.close(); }
 });
@@ -414,24 +459,6 @@ test('AI setup rejects a generator that explicitly lacks text input before strea
  } finally { await f.close(); }
 });
 
-test('setup model options flag unusable authorized routes without discovering provider models', async () => {
- const f = await fixture(); try {
-  f.allow([{ provider: 'p', model: 'vision' }, { provider: 'p', model: 'm' }, { provider: 'q', model: 'missing' }]);
-  const llm = f.root.get('llm');
-  const resolve = llm.resolveModelInfo;
-  llm.resolveModelInfo = async (provider, model, signal) => ({ ...await resolve(provider, model, signal), inputModalities: model === 'vision' ? ['image'] : undefined });
-  await f.controller.operation('models', { view: 'options' }, f.actor);
-  assert.deepEqual(f.calls.metadata, []);
-  const options = await f.controller.operation('models', { view: 'setup-options' }, f.actor);
-  assert.deepEqual(options.explicitRoutes, [
-   { provider: 'p', model: 'vision', generatorUnavailable: 'non-text' },
-   { provider: 'p', model: 'm' },
-   { provider: 'q', model: 'missing', generatorUnavailable: 'metadata' },
-  ]);
-  assert.deepEqual(f.calls.directory, []);
- } finally { await f.close(); }
-});
-
 test('AI setup excludes image-only role candidates and preserves a valid text row', async () => {
  const f = await fixture(); try {
   f.allow([{ provider: 'p', model: 'm' }, { provider: 'p', model: 'vision' }]);
@@ -469,14 +496,20 @@ test('AI setup accepts a single fenced JSON response and still rejects prose', a
  } finally { await f.close(); }
 });
 
-test('provider options expose the same explicit routes as generation without enumerating models', async () => {
+test('Session provider options and AI candidate proposals use the same explicit policy', async () => {
  const f = await fixture(); try {
   const allowed = [{ provider: 'q', model: 'large' }];
   f.allow(allowed);
   assert.deepEqual((await f.controller.models(f.actor, { view: 'options' })).explicitRoutes, allowed);
   assert.deepEqual(f.calls.directory, []);
   assert.deepEqual(f.calls.metadata, []);
-  await assert.rejects(f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor), /not authorized/);
+  const proposal = await f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor);
+  assert.deepEqual(proposal.proposalGenerator, { provider: 'p', model: 'm' });
+  const choices = JSON.parse(f.calls.stream[0].messages[0].content[0].text).constraints.allowedModels;
+  assert.deepEqual(choices.map(({ provider, model }) => ({ provider, model })), allowed);
+  assert.equal(proposal.rows[0].status, 'blocked');
+  assert.match(proposal.rows[0].warnings.at(-1).original, /unavailable or unauthorized model: p\/m/);
+  assert.deepEqual(f.calls.directory, []);
  } finally { await f.close(); }
 });
 
@@ -682,7 +715,7 @@ test('inactive browser strategy does not validate or fetch unrelated routes and 
   assert.equal(p.rows[0].status,'unchanged'); assert.deepEqual(f.calls.metadata,[]);
   await assert.rejects(f.controller.operation('recommend',strategyRequest({mode:'inherit'},{defaultRoute:{provider:'q',model:'large'}})),/mix/);
   await assert.rejects(f.controller.operation('recommend',strategyRequest({mode:'inherit'},{scopePolicy:'all'})),/policy/);
-  await assert.rejects(f.controller.operation('recommend',{roleIds:['reader'],scopePolicy:'fill-unconfigured'}),/active Session is required/);
+  await assert.rejects(f.controller.operation('recommend',{roleIds:['reader'],scopePolicy:'fill-unconfigured'}),/Select a provider and model/);
  } finally { await f.close(); }
 });
 
@@ -709,6 +742,26 @@ test('indirect prefix impacts require version-bound acceptance even when final r
   const result = await f.controller.operation('applySetup',{...request,impactRevision:preview.impactRevision,acceptedIndirectRoles:['protected-review']});
   assert.equal(result.status,'stopped'); assert.deepEqual(result.rows.map(row=>row.status),['applied','failed']);
   assert.equal((await f.controller.catalog()).agents.find(role=>role.id==='protected-review').model.model,'large');
+ } finally { await f.close(); }
+});
+
+test('selected derived roles retain intermediate prefix impacts in a batch', async () => {
+ const f = await fixture(); try {
+  const save = async (id, patch) => f.controller.save({ id, text: JSON.stringify({ schemaVersion: 2, id, ...patch }) });
+  await save('batch-base', { extends: 'reader', model: { mode: 'fixed', provider: 'p', model: 'm' } });
+  await save('batch-child', { extends: 'batch-base' });
+  const catalog = await f.controller.catalog();
+  const row = (id, patch) => ({ id, text: JSON.stringify({ schemaVersion: 2, id, ...patch }), roleRevision: catalog.agents.find(role => role.id === id).revision, expectedRevision: f.store.getOverride(id).revision });
+  const request = { setupPolicy: { scopePolicy: 'replace-selected' }, rows: [row('batch-base', { extends: 'reader', model: { mode: 'fixed', provider: 'q', model: 'large' } }), row('batch-child', { extends: 'batch-base' })] };
+  const preview = await f.controller.previewSetup(request);
+  const impact = preview.impacts.find(value => value.id === 'batch-child');
+  assert.equal(impact.prefixes[0].afterId, 'batch-base');
+  await assert.rejects(f.controller.applySetup({ ...request, impactRevision: preview.impactRevision }), /Confirm every/);
+  const originalBatch = f.store.saveBatch.bind(f.store);
+  f.store.saveBatch = (rows, validate) => originalBatch(rows, async index => { await validate(index); if (index === 1) throw new Error('Injected second-write failure'); });
+  const result = await f.controller.applySetup({ ...request, impactRevision: preview.impactRevision, acceptedIndirectRoles: ['batch-child'] });
+  assert.deepEqual(result.rows.map(row => row.status), ['applied', 'failed']);
+  assert.equal((await f.controller.catalog()).agents.find(role => role.id === 'batch-child').model.model, 'large');
  } finally { await f.close(); }
 });
 
@@ -929,7 +982,7 @@ test('an authorized image-only route from a saved definition cannot launch a tex
   } finally { await f.close(); }
 });
 
-test('setup model options return fast declarations while a different adapter remains stalled', async t => {
+test('AI setup uses fast candidate declarations while a different adapter remains stalled', async t => {
  const f = await fixture();
  try {
   f.allow([{ provider: 'p', model: 'm' }, { provider: 'q', model: 'stuck' }]);
@@ -946,17 +999,19 @@ test('setup model options return fast declarations while a different adapter rem
    return new Promise(done => { finishLate = done; });
   };
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const response = f.controller.models(f.actor, { view: 'setup-options' });
+  const response = f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor);
   await started;
   await new Promise(done => setImmediate(done));
   t.mock.timers.tick(10_000);
   const reply = await Promise.race([response, new Promise(done => setImmediate(() => done(null)))]);
-  assert.ok(reply, 'the picker must settle before the stalled adapter returns');
-  assert.deepEqual(reply.explicitRoutes, [{ provider: 'p', model: 'm' }, { provider: 'q', model: 'stuck', generatorUnavailable: 'metadata' }]);
+  assert.ok(reply, 'generation must settle before the stalled metadata lookup returns');
+  assert.equal(reply.rows[0].applicable, true);
+   const choices = () => JSON.parse(f.calls.stream[0].messages[0].content[0].text).constraints.allowedModels.map(({ provider, model }) => ({ provider, model }));
+   assert.deepEqual(choices(), [{ provider: 'p', model: 'm' }]);
   assert.equal(slowSignal.aborted, true);
   finishLate({ provider: 'q', id: 'stuck' });
   await new Promise(done => setImmediate(done));
-  assert.equal(reply.explicitRoutes[1].generatorUnavailable, 'metadata');
+  assert.deepEqual(choices(), [{ provider: 'p', model: 'm' }]);
  } finally { await f.close(); }
 });
 
@@ -982,14 +1037,16 @@ test('setup metadata gives later authorized routes a turn even if every first lo
    });
   };
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const pending = f.controller.models(f.actor, { view: 'setup-options' });
+  const pending = f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor);
   await initial;
   for (let index = 0; index < 4; index++) {
    t.mock.timers.tick(1000);
    await new Promise(done => setImmediate(done));
   }
   const result = await pending;
-  assert.deepEqual(result.explicitRoutes, [...first.map(route => ({ ...route, generatorUnavailable: 'metadata' })), later]);
+  assert.equal(result.rows[0].applicable, true);
+   const choices = JSON.parse(f.calls.stream[0].messages[0].content[0].text).constraints.allowedModels;
+   assert.deepEqual(choices.map(({ provider, model }) => ({ provider, model })), [later]);
   assert.deepEqual(f.calls.metadata, [[later.provider, later.model]]);
  } finally {
   for (const { done } of stalled) done({});
@@ -1014,5 +1071,104 @@ test('all setup modes require text input even for a declared image model', async
     assert.ok(row.warnings.some(warning => warning.code === 'setup.textRequired'), row.id);
    }
   }
+ } finally { await f.close(); }
+});
+
+test('single form edits preserve the authored layer and single writes require current indirect consent', async () => {
+ const f = await fixture();
+ try {
+  const id = 'derived-reader';
+  const baseline = '# preserve me\nschemaVersion: 2\nid: derived-reader\nextends: reader # parent\ncapabilities: { remove: [files-read] } # list edit\n';
+  const saveParent = async (maxTokens, expectedRevision) => {
+   const request = { id: 'reader', text: definition({ output: { maxTokens } }), expectedRevision };
+   const checked = await f.controller.previewChange(request);
+   return f.controller.save({ ...request, impactRevision: checked.impactRevision, acceptedIndirectRoles: checked.impacts.map(item => item.id) });
+  };
+  const parentSaved = await saveParent(4096);
+  const derivedSaved = await f.controller.save({ id, text: baseline });
+  const patch = await f.controller.previewChange({ id, expectedRevision: derivedSaved.revision, actions: [{ op: 'set', path: ['context', 'elasticTokens'], value: 50000 }] });
+  for (const comment of ['# preserve me', '# parent', '# list edit']) assert.ok(patch.text.includes(comment));
+  assert.equal(parseOverrideText(patch.text).output, undefined);
+  const edited = await f.controller.save({ id, text: patch.text, expectedRevision: derivedSaved.revision, impactRevision: patch.impactRevision });
+  const raw = { id: 'reader', text: definition({ output: { maxTokens: 8192 } }), expectedRevision: parentSaved.revision };
+  const checked = await f.controller.previewChange(raw);
+  assert.equal(checked.impacts.find(item => item.id === id).before.output.maxTokens, 4096);
+  assert.equal(checked.impacts.find(item => item.id === id).after.output.maxTokens, 8192);
+  await assert.rejects(f.controller.save(raw), /impact preview is required/);
+  await assert.rejects(f.controller.save({ ...raw, impactRevision: checked.impactRevision }), /Confirm every/);
+  const newParent = await saveParent(8192, parentSaved.revision);
+  const clear = await f.controller.previewChange({ id, expectedRevision: edited.revision, actions: [{ op: 'clear-output', path: ['output'] }] });
+  assert.equal(parseOverrideText(clear.text).output, null);
+  await f.controller.save({ id, text: clear.text, expectedRevision: edited.revision, impactRevision: clear.impactRevision });
+  await assert.rejects(f.controller.save({ ...raw, expectedRevision: newParent.revision, impactRevision: checked.impactRevision, acceptedIndirectRoles: [id] }), /preview changed/);
+  assert.equal((await f.controller.catalog()).agents.find(role => role.id === id).output, undefined);
+  const derivedRevision = f.store.getOverride(id).revision;
+  const restore = await f.controller.previewChange({ id, expectedRevision: derivedRevision, actions: [{ op: 'delete', path: ['output'] }] });
+  await f.controller.save({ id, text: restore.text, expectedRevision: derivedRevision, impactRevision: restore.impactRevision });
+  assert.equal((await f.controller.catalog()).agents.find(role => role.id === id).output.maxTokens, 8192);
+  const reset = { id: 'reader', expectedRevision: newParent.revision };
+  await assert.rejects(f.controller.reset(reset), /impact preview is required/);
+  const resetPreview = await f.controller.previewChange({ ...reset, reset: true });
+  await f.controller.reset({ ...reset, impactRevision: resetPreview.impactRevision, acceptedIndirectRoles: [id] });
+ } finally { await f.close(); }
+});
+
+test('sparse parent output preflight preserves a schema v1 derived override', async () => {
+ const f = await fixture();
+ try {
+  const id = 'long-document-reader';
+  const original = '# legacy author text\nschemaVersion: 1\nid: long-document-reader\nextends: reader\n';
+  await f.controller.save({ id, text: original });
+  const draft = { id: 'reader', actions: [
+   { op: 'set', path: ['schemaVersion'], value: 2 },
+   { op: 'set', path: ['output'], value: { maxTokens: 4096 } },
+  ] };
+  const preview = await f.controller.previewChange(draft);
+  const impact = preview.impacts.find(item => item.id === id);
+  assert.equal(impact.before.output, undefined);
+  assert.equal(impact.after.output.maxTokens, 4096);
+  await assert.rejects(f.controller.save({ id: draft.id, text: preview.text, impactRevision: preview.impactRevision }), /Confirm every/);
+  await f.controller.save({ id: draft.id, text: preview.text, impactRevision: preview.impactRevision, acceptedIndirectRoles: [id] });
+  assert.equal(f.store.getOverride(id).text, original);
+  const role = (await f.controller.catalog()).agents.find(item => item.id === id);
+  assert.equal(role.schemaVersion, 2);
+  assert.equal(role.output.maxTokens, 4096);
+ } finally { await f.close(); }
+});
+
+test('global generation keeps the exact route through a stalled provider directory and cancels before streaming', async t => {
+ const f = await fixture();
+ try {
+  const llm = f.root.get('llm');
+  let started;
+  llm.listModels = provider => {
+   if (provider === 'p') return Promise.resolve([{ provider: 'p', id: 'small', name: 'Fast listed option' }]);
+   started();
+   return new Promise(() => {});
+  };
+  const input = { roleIds: ['reader'], generatorRoute: { provider: 'p', model: 'm' } };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const begin = () => new Promise(resolve => { started = resolve; });
+  const inDirectory = begin();
+  const work = f.controller.operation('recommend', input);
+  await inDirectory;
+  assert.deepEqual(f.calls.metadata[0], ['p', 'm']);
+  // Let the fast listing's promise continuations settle before reaching the mock deadline.
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(4000);
+  const result = await work;
+  assert.equal(result.rows[0].applicable, true);
+  assert.ok(result.models.some(model => model.provider === 'p' && model.id === 'small'));
+  const directoryWarnings = result.diagnostics.filter(item => item.code === 'setup.directoryIncomplete');
+  assert.equal(directoryWarnings.length, 1);
+  assert.match(directoryWarnings[0].original, /^q:.*deadline/i);
+  assert.equal(f.calls.stream.length, 1);
+  const abort = new AbortController();
+  const nextDirectory = begin();
+  const pending = f.controller.operation('recommend', input, undefined, abort.signal);
+  await nextDirectory;
+  abort.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(f.calls.stream.length, 1);
  } finally { await f.close(); }
 });

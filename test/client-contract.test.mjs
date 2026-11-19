@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
+import { parse } from 'yaml';
+import { parseOverrideText } from '../lib/core/index.js';
+import { applyDefinitionActions } from '../lib/host/setup.js';
 
 const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
 let registration;
@@ -21,7 +24,7 @@ const general = {
   description: { en: 'General tasks', zh: '通用任务' }, instructions: 'Preserve task authorization.',
   capabilities: ['files-read'], skills: [], scripts: [], inputs: ['Task'], deliverables: ['Report'],
   model: { mode: 'inherit' }, reasoning: { mode: 'inherit-compatible' },
-  context: { targetTokens: 24000, elasticTokens: 12000 }, enabled: true,
+  context: { targetTokens: 24000, elasticTokens: 48000 }, enabled: true,
   revision: 'factory-r1', builtin: true, available: true, missingCapabilities: [],
 };
 const catalog = (overrides = [], agents = [general]) => ({
@@ -41,7 +44,22 @@ function harness(responder = () => ok(catalog())) {
     assert.ok(endpoint.startsWith('agentdeck.'));
     const call = { channel, endpoint, payload: clone(payload), signal };
     calls.push(call);
-    return responder(call, calls.length);
+    if (endpoint === 'agentdeck.inspectDefinition') {
+      try { return ok({ id: parseOverrideText(payload.text).id }); }
+      catch (error) { return { ok: false, error: { message: error.message } }; }
+    }
+    const response = responder(call, calls.length);
+    if (endpoint !== 'agentdeck.previewChange') return response;
+    return Promise.resolve(response).then(value => {
+      const preview = value?.ok && value.value;
+      if (preview && typeof preview.impactRevision === 'string' && (typeof preview.text === 'string' || preview.reset === true)) return value;
+      if (!value?.ok) return value;
+      const snapshot = controller.getSnapshot();
+      const role = snapshot.catalog?.agents.find(item => item.id === payload.id);
+      const stored = snapshot.catalog?.overrides.find(item => item.id === payload.id);
+      const text = payload.actions ? applyDefinitionActions(stored?.text, role, payload.actions) : payload.text;
+      return ok({ id: payload.id, ...(payload.reset ? { reset: true } : { text }), impacts: [], impactRevision: 'compat-' + payload.id });
+    });
   } } });
   return { controller, calls };
 }
@@ -121,7 +139,9 @@ test('save errors preserve raw YAML and the revision used for concurrency contro
   const text = 'schemaVersion: 1\nid: general\nenabled: false\n';
   const { controller, calls } = harness(call => call.endpoint === 'agentdeck.catalog'
     ? ok(catalog([{ id: 'general', text: 'id: general\n', revision: 'override-r1' }]))
-    : { ok: false, error: { code: 'CONFLICT', message: 'Override changed' } });
+    : call.endpoint === 'agentdeck.previewChange'
+      ? ok({ id: 'general', text, impacts: [], impactRevision: 'change-r1' })
+      : { ok: false, error: { code: 'CONFLICT', message: 'Override changed' } });
   await controller.loadCatalog();
   controller.edit('general', text);
   const answer = await controller.save('general');
@@ -129,7 +149,7 @@ test('save errors preserve raw YAML and the revision used for concurrency contro
   assert.equal(controller.getSnapshot().drafts.general.text, text);
   assert.equal(controller.getSnapshot().drafts.general.expectedRevision, 'override-r1');
   assert.equal(controller.getSnapshot().errors.save.code, 'CONFLICT');
-  assert.deepEqual(calls.at(-1).payload, { id: 'general', text, expectedRevision: 'override-r1' });
+  assert.deepEqual(calls.at(-1).payload, { id: 'general', text, expectedRevision: 'override-r1', impactRevision: 'change-r1', acceptedIndirectRoles: [] });
   controller.dispose();
 });
 
@@ -149,16 +169,18 @@ test('refresh preserves dirty drafts, including their old expectedRevision', asy
 
 test('typing during an in-flight save survives a successful response and reload', async () => {
   const pending = deferred();
+  const started = deferred();
   let saved = false;
   const first = 'id: general\nenabled: false\n';
   const later = first + 'instructions: Keep this later edit\n';
   const { controller } = harness(call => {
-    if (call.endpoint === 'agentdeck.save') return pending.promise;
+    if (call.endpoint === 'agentdeck.save') { started.resolve(); return pending.promise; }
     return ok(saved ? catalog([{ id: 'general', text: first, revision: 'override-r2' }]) : catalog());
   });
   await controller.loadCatalog();
   controller.edit('general', first);
   const saving = controller.save('general');
+  await started.promise;
   controller.edit('general', later);
   saved = true;
   pending.resolve(ok({ id: 'general', text: first, revision: 'override-r2' }));
@@ -174,7 +196,8 @@ test('structured controls cannot overwrite dirty raw YAML', async () => {
   const { controller } = harness();
   await controller.loadCatalog();
   controller.updateForm('general', { enabled: false });
-  assert.equal(JSON.parse(controller.getSnapshot().drafts.general.text).enabled, false);
+  assert.equal(controller.getSnapshot().drafts.general.form.enabled, false);
+  assert.equal(parse(await controller.materializeDraft('general')).enabled, false);
   controller.edit('general', 'id: general\ninstructions: custom\n');
   controller.updateForm('general', { enabled: true });
   assert.equal(controller.getSnapshot().drafts.general.text, 'id: general\ninstructions: custom\n');
@@ -201,17 +224,18 @@ test('import updates an existing role with its override revision and preserves o
     : ok(catalog([{ id: 'general', revision: 'override-r1', text: 'id: general\n' }])));
   await controller.loadCatalog();
   const text = 'schemaVersion: 1\nid: general\nenabled: false\n';
-  assert.equal(controller.importText(text), true);
+  assert.equal(await controller.importText(text), true);
+  assert.equal(controller.useExistingDocument(), true);
   assert.equal(controller.getSnapshot().creating, false);
   assert.equal(controller.getSnapshot().selectedId, 'general');
   assert.equal(controller.getSnapshot().drafts.general.text, text);
   await controller.save('general');
   assert.equal(calls.find(call => call.endpoint === 'agentdeck.save').payload.expectedRevision, 'override-r1');
   controller.edit('general', 'id: general\ninstructions: keep\n');
-  assert.equal(controller.importText(text), false);
+  assert.equal(await controller.importText(text), true);
+  assert.equal(controller.useExistingDocument(), false);
   assert.equal(controller.getSnapshot().drafts.general.text, 'id: general\ninstructions: keep\n');
-  assert.equal(controller.getSnapshot().errors.import.code, 'draftConflict');
-  assert.equal(controller.importText('x'.repeat(1024 * 1024 + 1)), false);
+  assert.equal(await controller.importText('x'.repeat(1024 * 1024 + 1)), false);
   assert.equal(controller.getSnapshot().errors.import.code, 'importTooLarge');
   controller.dispose();
 });
@@ -226,7 +250,7 @@ test('a new draft is preserved across cancel, derive and import attempts', async
   controller.beginCreate('reader');
   assert.equal(controller.getSnapshot().drafts['@new'].text, draft);
   assert.equal(controller.getSnapshot().creating, true);
-  assert.equal(controller.importText('id: other-role\nextends: general\n'), false);
+  assert.equal(await controller.importText('id: other-role\nextends: general\n'), false);
   assert.equal(controller.getSnapshot().drafts['@new'].text, draft);
   controller.dispose();
 });
@@ -234,17 +258,19 @@ test('a new draft is preserved across cancel, derive and import attempts', async
 test('reset calls the Host and leaves the draft intact on failure', async () => {
   const { controller, calls } = harness(call => call.endpoint === 'agentdeck.catalog'
     ? ok(catalog([{ id: 'general', revision: 'override-r1', text: 'id: general\n' }]))
-    : { ok: false, error: { code: 'STORAGE', message: 'Store is read only' } });
+    : call.endpoint === 'agentdeck.previewChange'
+      ? ok({ id: 'general', reset: true, impacts: [], impactRevision: 'reset-r1' })
+      : { ok: false, error: { code: 'STORAGE', message: 'Store is read only' } });
   await controller.loadCatalog();
   controller.edit('general', 'id: general\nenabled: false\n');
   const before = controller.getSnapshot().drafts.general.text;
   assert.equal((await controller.reset('general')).ok, false);
   assert.equal(controller.getSnapshot().drafts.general.text, before);
-  assert.deepEqual(calls.at(-1).payload, { id: 'general', expectedRevision: 'override-r1' });
+  assert.deepEqual(calls.at(-1).payload, { id: 'general', expectedRevision: 'override-r1', impactRevision: 'reset-r1', acceptedIndirectRoles: [] });
   controller.dispose();
 });
 
-test('saving an existing role includes the selected Session and expected revision', async () => {
+test('project preview is read-only until the draft is bound to the selected Session', async () => {
   const text = 'schemaVersion: 1\nid: general\nenabled: false\n';
   const { controller, calls } = harness(call => call.endpoint === 'agentdeck.save'
     ? ok({ id: call.payload.id, text: call.payload.text, revision: 'override-r2' })
@@ -252,9 +278,18 @@ test('saving an existing role includes the selected Session and expected revisio
   controller.setSession('session-a');
   await controller.loadCatalog();
   controller.edit('general', text);
+  assert.equal((await controller.save('general')).ok, false);
+  assert.equal((await controller.reset('general')).ok, false);
+  assert.ok(calls.every(call => call.endpoint === 'agentdeck.catalog'));
+  assert.equal(controller.useProjectEdit('general'), true);
+  controller.edit('general', text);
+  controller.setSession('session-b');
+  assert.equal((await controller.save('general')).ok, false);
+  controller.setSession('session-a');
+  await controller.loadCatalog();
   assert.equal((await controller.save('general')).ok, true);
   const save = calls.find(call => call.endpoint === 'agentdeck.save');
-  assert.deepEqual(save.payload, { sessionId: 'session-a', id: 'general', text, expectedRevision: 'override-r1' });
+  assert.deepEqual(save.payload, { sessionId: 'session-a', id: 'general', text, expectedRevision: 'override-r1', impactRevision: 'compat-general', acceptedIndirectRoles: [] });
   assert.ok(calls.filter(call => call.endpoint === 'agentdeck.catalog').every(call => call.payload.sessionId === 'session-a'));
   controller.dispose();
 });
@@ -263,12 +298,16 @@ test('deriving a project role includes the selected Session in the new-role save
   const projectRole = { ...general, id: 'project-base', builtin: false };
   const { controller, calls } = harness(call => {
     if (call.endpoint === 'agentdeck.catalog') return ok(catalog([], [general, projectRole]));
-    assert.equal(call.endpoint, 'agentdeck.save');
     assert.equal(call.payload.sessionId, 'session-a', 'Derivation must use the same project catalog as the selected Session');
+    if (call.endpoint === 'agentdeck.previewChange') return ok({ id: call.payload.id, text: call.payload.text, impacts: [], impactRevision: 'project-r1' });
+    assert.equal(call.endpoint, 'agentdeck.save');
     return ok({ id: call.payload.id, text: call.payload.text, revision: 'custom-r1' });
   });
   controller.setSession('session-a');
   await controller.loadCatalog();
+  controller.beginCreate('project-base');
+  assert.equal(controller.getSnapshot().creating, false);
+  assert.equal(controller.useProjectEdit('project-base'), true);
   controller.beginCreate('project-base');
   controller.setNewId('project-derived');
   assert.equal((await controller.save('@new')).ok, true);
@@ -286,9 +325,10 @@ test('reset includes the selected Session and keeps its revision check', async (
     : ok(catalog([{ id: 'general', text: 'id: general\n', revision: 'override-r1' }])));
   controller.setSession('session-a');
   await controller.loadCatalog();
+  assert.equal(controller.useProjectEdit('general'), true);
   assert.equal((await controller.reset('general')).ok, true);
   const reset = calls.find(call => call.endpoint === 'agentdeck.reset');
-  assert.deepEqual(reset.payload, { sessionId: 'session-a', id: 'general', expectedRevision: 'override-r1' });
+  assert.deepEqual(reset.payload, { sessionId: 'session-a', id: 'general', expectedRevision: 'override-r1', impactRevision: 'compat-general', acceptedIndirectRoles: [] });
   assert.ok(calls.filter(call => call.endpoint === 'agentdeck.catalog').every(call => call.payload.sessionId === 'session-a'));
   controller.dispose();
 });
@@ -362,19 +402,48 @@ test('result paging uses nextOffset and does not fabricate completion from idle'
 
 test('a stale result page preserves loaded text and a first-page reload replaces it', async () => {
   let revision = 'old';
-  const { controller } = harness(call => ok({
+  const run = { id: 'run', childId: 'child-a', parentId: 'parent', phase: 'accepted', nativeStatus: 'running' };
+  const { controller } = harness(call => call.endpoint === 'agentdeck.runs' ? ok({ runs: [run] }) : ok({
     childId: 'child-a', status: 'running', rawText: revision, resultRevision: revision,
     totalCharacters: 10, nextOffset: call.payload.offset ? undefined : revision.length,
   }));
   try {
+    await controller.loadRuns();
     await controller.loadResult('child-a');
+    assert.equal(controller.getSnapshot().runs[0].businessStatus, 'running');
     revision = 'new';
     const stale = await controller.loadResult('child-a', true);
     assert.equal(stale.error.code, 'AGENTDECK_RESULT_CHANGED');
     assert.equal(controller.getSnapshot().result.rawText, 'old');
+    assert.equal(controller.getSnapshot().resultStale, true);
+    assert.equal(controller.getSnapshot().runs[0].businessStatus, undefined);
+    assert.equal(controller.getSnapshot().runs[0].businessStatusCheckedAt, undefined);
     await controller.loadResult('child-a');
     assert.equal(controller.getSnapshot().result.rawText, 'new');
+    assert.equal(controller.getSnapshot().resultStale, false);
+    assert.ok(controller.getSnapshot().runs[0].businessStatusCheckedAt);
     assert.equal(controller.getSnapshot().errors.result, null);
+  } finally { controller.dispose(); }
+});
+
+test('historical run filters are independent and result detail backfills only observed status', async () => {
+  const run = { id: 'run', childId: 'child', parentId: 'past-parent', phase: 'accepted', nativeStatus: 'not-resident' };
+  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.runs'
+    ? ok({ runs: [run], parentIds: ['past-parent'] })
+    : ok({ childId: 'child', status: 'finished-unverified', rawText: '', resultRevision: 'r1' }));
+  try {
+    controller.setSession('preview-session');
+    controller.setRunParent('past-parent');
+    await controller.loadRuns();
+    assert.deepEqual(calls.map(call => call.payload), [{ parentId: 'past-parent' }]);
+    assert.equal(controller.getSnapshot().runs[0].businessStatus, undefined);
+    await controller.loadResult('child');
+    assert.equal('sessionId' in calls.at(-1).payload, false);
+    assert.equal(controller.getSnapshot().runs[0].businessStatus, 'finished-unverified');
+    assert.ok(controller.getSnapshot().runs[0].businessStatusCheckedAt);
+    await controller.loadRuns();
+    assert.equal(controller.getSnapshot().runs[0].businessStatus, undefined);
+    assert.equal(controller.getSnapshot().result, null);
   } finally { controller.dispose(); }
 });
 
@@ -479,11 +548,17 @@ test('unmount ends a non-cooperative read and clears its deadline without a fals
 });
 
 test('mutations have no read deadline or automatic replay', async () => {
-  const pending = deferred();
-  const f = deadlineHarness(call => call.endpoint === 'agentdeck.catalog' ? ok(catalog()) : pending.promise);
+  const pending = deferred(), started = deferred();
+  const f = deadlineHarness(call => {
+    if (call.endpoint === 'agentdeck.catalog') return ok(catalog());
+    if (call.endpoint === 'agentdeck.previewChange') return ok({ id: 'general', text: call.payload.text, impacts: [], impactRevision: 'change-r1' });
+    started.resolve();
+    return pending.promise;
+  });
   await f.controller.loadCatalog();
   f.controller.edit('general', 'schemaVersion: 1\nid: general\nenabled: false\n');
   const saving = f.controller.save('general');
+  await started.promise;
   assert.equal(f.timers.size, 0);
   pending.resolve({ ok: false, error: { message: 'fixture save failed' } });
   assert.equal((await saving).ok, false);
@@ -505,17 +580,17 @@ test('existing v1 definitions stay v1 until a new feature is authored', async ()
     controller.updateForm('general', { model: { mode: 'fixed', provider: 'p', model: 'm' }, reasoning: { mode: 'fixed', effort: 'high' } });
     assert.equal(JSON.parse(controller.getSnapshot().drafts.general.text).schemaVersion, 1);
     controller.updateForm('general', { output: { maxTokens: 6000 } });
-    let definition = JSON.parse(controller.getSnapshot().drafts.general.text);
+    let definition = parse(await controller.materializeDraft('general'));
     assert.equal(definition.schemaVersion, 2);
     assert.deepEqual(definition.output, { maxTokens: 6000 });
     controller.updateForm('general', { output: undefined });
-    definition = JSON.parse(controller.getSnapshot().drafts.general.text);
+    definition = parse(await controller.materializeDraft('general'));
     assert.equal(definition.schemaVersion, 2);
     assert.equal(definition.output, null, 'an override must explicitly clear an inherited output cap');
     controller.discard('general');
     assert.equal(JSON.parse(controller.getSnapshot().drafts.general.text).schemaVersion, 1);
     controller.setModelMode('general', 'auto');
-    assert.equal(JSON.parse(controller.getSnapshot().drafts.general.text).schemaVersion, 2);
+    assert.equal(controller.getSnapshot().drafts.general.form.schemaVersion, 2);
   } finally { controller.dispose(); }
 });
 
@@ -524,7 +599,7 @@ test('output caps roundtrip through save and catalog without changing other defi
   let override;
   const { controller, calls } = harness(call => {
     if (call.endpoint === 'agentdeck.save') {
-      current = { ...JSON.parse(call.payload.text), revision: 'override-r2', builtin: true, available: true, missingCapabilities: [] };
+      current = { ...current, ...parse(call.payload.text), revision: 'override-r2', builtin: true, available: true, missingCapabilities: [] };
       override = { id: current.id, text: call.payload.text, revision: current.revision };
       return ok(override);
     }
@@ -534,15 +609,16 @@ test('output caps roundtrip through save and catalog without changing other defi
     await controller.loadCatalog();
     controller.updateForm('general', { output: { maxTokens: 7000 } });
     controller.updateForm('general', { context: { ...general.context, targetTokens: 25000 } });
-    const authored = JSON.parse(controller.getSnapshot().drafts.general.text);
+    const authored = parse(await controller.materializeDraft('general'));
     assert.deepEqual(authored.output, { maxTokens: 7000 });
-    assert.equal(authored.instructions, general.instructions);
+    assert.equal('instructions' in authored, false);
+    assert.deepEqual(authored.context, { targetTokens: 25000 });
     assert.equal((await controller.save('general')).ok, true);
     const draft = controller.getSnapshot().drafts.general;
     assert.equal(draft.text, draft.baseline);
     assert.equal(draft.expectedRevision, 'override-r2');
     assert.equal(draft.form.output.maxTokens, 7000);
-    assert.deepEqual(JSON.parse(plugin.definitionText(current)), authored);
+    assert.equal(current.instructions, general.instructions);
     assert.equal(calls.filter(call => call.endpoint === 'agentdeck.save').length, 1);
   } finally { controller.dispose(); }
 });
@@ -552,7 +628,7 @@ test('inline auto editor owns candidate cap and effort, preserves defaults, and 
   let override;
   const { controller } = harness(call => {
     if (call.endpoint === 'agentdeck.save') {
-      current = { ...JSON.parse(call.payload.text), revision: 'auto-r2', builtin: true, available: true, missingCapabilities: [] };
+      current = { ...current, ...parse(call.payload.text), revision: 'auto-r2', builtin: true, available: true, missingCapabilities: [] };
       override = { id: current.id, text: call.payload.text, revision: current.revision };
       return ok(override);
     }
@@ -579,13 +655,13 @@ test('inline auto editor owns candidate cap and effort, preserves defaults, and 
     controller.addCandidate('general');
     assert.equal(controller.getSnapshot().drafts.general.form.model.candidates.length, 3);
     controller.removeCandidate('general', 2);
-    const authored = JSON.parse(controller.getSnapshot().drafts.general.text);
+    const authored = parse(await controller.materializeDraft('general'));
     assert.equal(authored.model.defaultCandidate, 'deep');
     assert.equal(authored.model.candidates[1].reasoning.effort, 'high');
     assert.equal(authored.model.candidates[1].maxTokens, 8000);
     assert.deepEqual(clone(plugin.formIssues(authored)), []);
     assert.equal((await controller.save('general')).ok, true);
-    assert.deepEqual(JSON.parse(controller.getSnapshot().drafts.general.text), authored);
+    assert.deepEqual(parse(controller.getSnapshot().drafts.general.text), authored);
     controller.removeCandidate('general', 1);
     assert.equal(controller.getSnapshot().drafts.general.form.model.defaultCandidate, 'fast');
     controller.removeCandidate('general', 0);
@@ -619,10 +695,15 @@ test('structured validation rejects incomplete candidates and invalid caps witho
 test('new feature controls cannot overwrite raw v1 or v2 imports and preserve CAS on refresh', async () => {
   for (const role of [general, autoRole()]) {
     const imported = plugin.definitionText({ ...role, enabled: false });
-    const { controller, calls } = harness(call => call.endpoint === 'agentdeck.save' ? { ok: false, error: { code: 'CONFLICT', message: 'Concurrent override' } } : ok(catalog([{ id: 'general', text: 'schemaVersion: 1\nid: general\n', revision: 'override-r1' }])));
+    const { controller, calls } = harness(call => call.endpoint === 'agentdeck.save'
+      ? { ok: false, error: { code: 'CONFLICT', message: 'Concurrent override' } }
+      : call.endpoint === 'agentdeck.previewChange'
+        ? ok({ id: 'general', text: call.payload.text, impacts: [], impactRevision: 'change-r1' })
+        : ok(catalog([{ id: 'general', text: 'schemaVersion: 1\nid: general\n', revision: 'override-r1' }])));
     try {
       await controller.loadCatalog();
-      assert.equal(controller.importText(imported), true);
+      assert.equal(await controller.importText(imported), true);
+      assert.equal(controller.useExistingDocument(), true);
       controller.updateForm('general', { output: { maxTokens: 5000 } });
       controller.setModelMode('general', 'auto');
       controller.addCandidate('general');
@@ -824,6 +905,46 @@ test('lost setup response reads back exact texts without automatically resubmitt
  await controller.applySetup();assert.equal(calls.filter(call=>call.endpoint==='agentdeck.applySetup').length,1);controller.dispose();
 });
 
+
+test('typed unknown single writes reconcile save and reset without resubmitting', async () => {
+ for (const kind of ['save', 'reset']) {
+  let committed = false;
+  const text = 'schemaVersion: 1\nid: general\nenabled: false\n';
+  const { controller, calls } = harness(call => {
+   if (call.endpoint === 'agentdeck.catalog') return ok(catalog(committed ? (kind === 'save' ? [{ id: 'general', text, revision: 'override-r2' }] : []) : [{ id: 'general', text: 'id: general\n', revision: 'override-r1' }]));
+   if (call.endpoint === 'agentdeck.previewChange') return ok(kind === 'save' ? { id: 'general', text, impacts: [], impactRevision: 'change-r1' } : { id: 'general', reset: true, impacts: [], impactRevision: 'change-r1' });
+   committed = true;
+   return { ok: false, error: { code: 'AGENTDECK_WRITE_OUTCOME_UNKNOWN', message: 'write outcome unknown' } };
+  });
+  try {
+   await controller.loadCatalog();
+   if (kind === 'save') controller.edit('general', text);
+   const answer = await controller[kind]('general');
+   assert.equal(answer.ok, false);
+   assert.equal(answer.observed, true);
+   assert.equal(calls.filter(call => call.endpoint === 'agentdeck.' + kind).length, 1);
+   if (kind === 'save') assert.equal(controller.getSnapshot().drafts.general.expectedRevision, 'override-r2');
+  } finally { controller.dispose(); }
+ }
+});
+
+test('successful batch responses reconcile uncertain rows from exact text readback', async () => {
+ const proposed = 'schemaVersion: 1\nid: general\nenabled: false\n';
+ let committed = false;
+ const { controller, calls } = harness(call => {
+  if (call.endpoint === 'agentdeck.applySetup') { committed = true; return ok({ status: 'stopped', rows: [{ id: 'general', status: 'uncertain', message: 'write confirmation unavailable' }] }); }
+  return ok(catalog(committed ? [{ id: 'general', text: proposed, revision: 'override-r2' }] : []));
+ });
+ try {
+  await controller.loadCatalog();
+  controller.set({ setupProposal: { rows: [{ id: 'general', applicable: true, roleRevision: 'factory-r1', proposedText: proposed }] }, setupSelected: { general: true }, setupPreviewReady: true });
+  const answer = await controller.applySetup();
+  assert.equal(answer.ok, true);
+  assert.equal(controller.getSnapshot().setupResult.rows[0].status, 'observed');
+  assert.equal(calls.filter(call => call.endpoint === 'agentdeck.applySetup').length, 1);
+ } finally { controller.dispose(); }
+});
+
 for (const change of ['Session change', 'newer catalog read']) {
  test('canceled setup readback cannot publish an obsolete result after ' + change, async () => {
   const pending = deferred(), started = deferred(); let reads = 0, writes = 0;
@@ -902,9 +1023,9 @@ for (const change of ['Session change', 'catalog refresh']) {
    await controller.loadCatalog();
    controller.updateSetup({ roleIds: ['project-agent', 'general'] });
    controller.edit('project-agent', 'unsaved project draft');
-   if (change === 'Session change') controller.setSession('session-b');
    agents = [general, reader];
-   await controller.loadCatalog();
+   if (change === 'Session change') await controller.setSetupSession('session-a');
+   else await controller.loadSetupCatalog();
    await controller.recommendSetup();
    assert.deepEqual(calls.find(call => call.endpoint === 'agentdeck.recommend').payload.roleIds, ['general']);
    assert.deepEqual(clone(controller.getSnapshot().setupOptions.roleIds), ['general']);

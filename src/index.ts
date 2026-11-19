@@ -2,8 +2,8 @@ import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { HostConnectionService, type HostConnectionRpc } from '@deepseek-ai/dsh-client-connection';
 import { loadBuiltinAgents } from './core/index.js';
-import { AgentDeckStore } from './host/store.js';
-import { AgentDeckController } from './host/controller.js';
+import { AgentDeckStore, WriteOutcomeUnknownError } from './host/store.js';
+import { AgentDeckController, ChangeImpactError } from './host/controller.js';
 import { ResultRevisionError } from './host/results.js';
 import { object, requiredString, optionalString, messageOf, jsonClone } from './host/types.js';
 import type { HostContext, RuntimeAgent, JsonObject } from './host/types.js';
@@ -130,7 +130,13 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
         if (sessionId && !actor) throw new Error('The selected Session is not live. Select a current Session to resolve inherited settings.');
         const value = await controller.operation(endpoint.slice('agentdeck.'.length), args, actor, signal);
         return { ok: true, value: jsonClone(value) };
-      } catch (error) { return { ok: false, error: { code: error instanceof ResultRevisionError ? 'AGENTDECK_RESULT_CHANGED' : 'AGENTDECK_OPERATION_FAILED', message: messageOf(error), details: {} } }; }
+      } catch (error) {
+        const code = error instanceof ChangeImpactError ? error.code
+          : error instanceof ResultRevisionError ? 'AGENTDECK_RESULT_CHANGED'
+          : error instanceof WriteOutcomeUnknownError ? 'AGENTDECK_WRITE_OUTCOME_UNKNOWN'
+          : 'AGENTDECK_OPERATION_FAILED';
+        return { ok: false, error: { code, message: messageOf(error), details: {} } };
+      }
     }), 'AgentDeck owner RPC');
   });
 }

@@ -53,6 +53,12 @@ function apply(base: AgentDefinition | undefined, patch: Record<string, unknown>
       result[field] = { ...(reset ? {} : current), ...part };
     } else result[field] = value;
   }
+  // A v1 override can inherit v2 resources from a validated parent or lower layer.
+  const effectiveModel = result.model as AgentDefinition['model'] | undefined;
+  if (result.schemaVersion === 1 && base?.schemaVersion === 2 &&
+      (result.output !== undefined || effectiveModel?.mode === 'auto')) {
+    result.schemaVersion = 2;
+  }
   return validateAgent(result);
 }
 

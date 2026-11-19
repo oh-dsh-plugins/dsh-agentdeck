@@ -15,6 +15,13 @@ export const storeSpec = defineDomain({
 
 export function textRevision(text: string): string { return createHash('sha256').update(text).digest('hex'); }
 
+export class WriteOutcomeUnknownError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = 'WriteOutcomeUnknownError';
+  }
+}
+
 /** Owns plugin data, never the active profile's composition. */
 export class AgentDeckStore {
   private serial = Promise.resolve();
@@ -49,7 +56,11 @@ export class AgentDeckStore {
       if (!current && expectedRevision) throw new Error('Agent override no longer exists. Reload before saving.');
       await validate?.();
       const value = { id, text, revision: textRevision(text), updatedAt: Date.now() };
-      await this.table('overrides').put(id, value);
+      try {
+        await this.table('overrides').put(id, value);
+      } catch (error) {
+        throw new WriteOutcomeUnknownError(error instanceof Error ? error.message : String(error), error);
+      }
       return value;
     });
   }
@@ -83,7 +94,11 @@ export class AgentDeckStore {
       const current = this.getOverride(id);
       if (!current || current.revision !== expectedRevision) throw new Error('Agent configuration changed. Reload before resetting.');
       await validate?.();
-      await this.table('overrides').delete(id);
+      try {
+        await this.table('overrides').delete(id);
+      } catch (error) {
+        throw new WriteOutcomeUnknownError(error instanceof Error ? error.message : String(error), error);
+      }
     });
   }
   private mutate<T>(operation: () => Promise<T>): Promise<T> {
