@@ -998,13 +998,24 @@ test('AI setup uses fast candidate declarations while a different adapter remain
    markStarted();
    return new Promise(done => { finishLate = done; });
   };
+  const setRealTimeout = globalThis.setTimeout;
+  const clearRealTimeout = globalThis.clearTimeout;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const response = f.controller.operation('recommend', { roleIds: ['reader'] }, f.actor);
-  await started;
-  await new Promise(done => setImmediate(done));
-  t.mock.timers.tick(10_000);
-  const reply = await Promise.race([response, new Promise(done => setImmediate(() => done(null)))]);
-  assert.ok(reply, 'generation must settle before the stalled metadata lookup returns');
+  let watchdog;
+  let reply;
+  try {
+   const timeout = new Promise((_, reject) => {
+    watchdog = setRealTimeout(() => reject(new Error('generation must settle before the stalled metadata lookup returns')), 5000);
+   });
+   await Promise.race([started, response, timeout]);
+   t.mock.timers.tick(10_000);
+   // The proposal rereads project files after the simulated model deadline.
+   reply = await Promise.race([response, timeout]);
+  } finally {
+   clearRealTimeout(watchdog);
+   if (!reply) finishLate?.({ provider: 'q', id: 'stuck' });
+  }
   assert.equal(reply.rows[0].applicable, true);
    const choices = () => JSON.parse(f.calls.stream[0].messages[0].content[0].text).constraints.allowedModels.map(({ provider, model }) => ({ provider, model }));
    assert.deepEqual(choices(), [{ provider: 'p', model: 'm' }]);

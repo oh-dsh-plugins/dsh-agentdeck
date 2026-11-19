@@ -2,7 +2,7 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
-## 0.2.11 — AgentDeck management and write recovery
+## 0.2.12 — AgentDeck management and write recovery
 
 - Separate the role details, quick setup and run-history Session controls. Preserve proposals while inspecting roles, and require a fresh preview when the setup scope changes.
 - Save sparse YAML overrides without flattening inherited settings. Preview indirect effects across known projects and require confirmation before affected writes, including intermediate effects in a batch.
