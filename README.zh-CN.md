@@ -1,7 +1,7 @@
 # DSH AgentDeck · 代理工具箱
 
 [![DSH 插件](https://img.shields.io/badge/DeepSeek%20Harness-plugin-2563eb)](https://github.com/deepseek-ai/deepseek-harness)
-[![DSH 兼容版本](https://img.shields.io/badge/DSH-0.2.2--rc.3-blue)](package.json)
+[![DSH 兼容版本](https://img.shields.io/badge/DSH-%3E%3D0.2.2--rc.1-blue)](package.json)
 [![CI](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml)
 [![MIT 许可证](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![npm 版本](https://img.shields.io/npm/v/dsh-agentdeck)](https://www.npmjs.com/package/dsh-agentdeck)
@@ -15,8 +15,8 @@
 - **16 个完整代理：**13 个基础角色和 3 个专业变体，均包含指令、预期输入、交付物、技能及工具能力。
 - **原生委派：**保留 DSH 的授权、调用者身份、取消、持久化、完成通知，并与 Agent Teams 共存。
 - **原生设置页面：**以中文或英文管理代理、任务与结果、诊断，沿用宿主的明暗主题。
-- **真实模型选择：**发现已配置的提供商、模型 ID 和支持的思考等级；支持继承父代理、固定模型，以及最多 3 个候选项和一个默认项。
-- **明确的资源设置：**角色或候选项的单次输出上限、总输入上下文预算、有界原生恢复，以及未知容量的明确提示。
+- **真实模型选择：**发现已配置提供商、模型及思考等级；支持继承、固定模型和带默认项的候选池。
+- **每角色 AI 建议：**选择独立的建议生成器，采用模型与推理配置到草稿；新任务沿用原生上下文恢复，无独立资源配额。
 - **可扩展定义：**派生角色、编辑 YAML、导入导出、重置覆盖项、加载用户和项目定义目录；运行中的任务保留原始快照。
 - **限定工具范围：**内置 16 个技能和 4 个标准库辅助脚本；浏览器会话归创建它的具体子代理所有。
 
@@ -26,8 +26,8 @@ AgentDeck 不增加分类模型或独立执行循环。配置了某项能力或�
 
 | 组件 | 支持基线 |
 | --- | --- |
-| AgentDeck | `0.2.12` |
-| DeepSeek Harness | **`0.2.2-rc.3`**；不声明兼容其他版本 |
+| AgentDeck | `0.3.0` |
+| DeepSeek Harness | **`>=0.2.2-rc.1`**；已发布宿主验证覆盖 `rc.1` 至 `rc.5`，未来版本须通过相同行为验收 |
 | Node.js | `>=24.9.0` |
 | 开发环境 | `PATH` 中可找到 DSH CLI；宿主依赖链接脚本使用 POSIX shell |
 | 可选能力 | 已有网页服务、原生工具或受支持的浏览器集成 |
@@ -39,18 +39,18 @@ DSH 提供自身的同伴依赖（peer dependencies）。不要为了满足本�
 将 npm 上的发行版本安装到兼容的 DSH 配置档：
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.2.12
+dsh plugin --profile web add dsh-agentdeck@0.3.0
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。DSH 插件管理器负责安装软件包并应用原生组合补丁。管理器提示需要重启时，重启 DSH，再刷新已有 Harness 页面。
 
 ### GitHub Release 安装包
 
-从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.2.12.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
+从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.3.0.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.2.12.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.3.0.tgz
 ```
 
 ### 从源码构建
@@ -65,7 +65,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.12.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.3.0.tgz
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。`dev:link-host` 查找已安装的 DSH CLI，并将其现有公开同伴依赖链接到当前项目，不修改宿主或活动配置档。CLI 位于其他位置时，可通过 `AGENTDECK_DSH_ROOT` 指定已安装的 DSH 包目录。
@@ -80,6 +80,14 @@ dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.12.tgz
 4. 阅读原生完成通知；需要更多证据时，再查看任务详情或分页结果。
 
 已知文件的小修改、简短任务可以直接处理。缺少依赖、角色停用或显式角色 ID 无效时，会返回诊断，不会悄悄切换到其他专业角色。
+
+### 跨机器迁移模型配置
+
+在「**设置 → 代理工具箱 → 代理**」选择「**导出模型配置**」，勾选需要的角色。JSON 文件包含已保存的模型模式、推理强度，以及候选标识、用途、顺序和默认项；不包含提供商连接、密钥、路径、指令或技能，也不会导出未保存草稿。
+
+在另一台机器上保持「会话上下文」未选择，再点击「**导入模型配置**」。逐项确认目标角色，将缺失的提供商、模型或不支持的推理强度映射到本机选项。可取消勾选以跳过角色，也可跳过单个候选；至少保留一个候选，跳过默认候选前需先明确选择新的默认项。继承模式跟随目标机器的配置。本机没有的角色需明确选择目标；由其他来源维护的角色需回到其来源编辑。
+
+点击「**预览变更**」检查前后配置，再「**采用到草稿**」。最后逐个使用角色原有的保存按钮；保存时仍会检查最新版本与继承影响。已有未保存草稿会受到保护。导入只迁移配置偏好，不会授予模型权限。
 
 ### 内置代理
 
@@ -117,14 +125,14 @@ dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.12.tgz
 
 ## 定制
 
-所有者设置页支持启停、真实提供商／模型／思考等级选择、输出与输入预算、YAML 编辑、派生、导入导出及重置。保存冲突会保留草稿。修改作用于新启动任务；运行中的任务保留原角色、技能、辅助脚本版本及已选模型。
+所有者设置页支持启停、真实提供商／模型／思考等级选择、YAML 编辑、派生、导入导出及重置。固定模型和候选模式各自在角色编辑页提供 AI 建议；用于生成建议的模型独立选择，无需选择会话。采用只修改草稿，正常保存后生效。运行中的任务保留原始快照。
 
-**批量配置助手**按需展示跟随会话、指定模型或共享的 1–3 个独立候选。已有一致的继承配置无需保存；默认保护已有覆盖、禁用／文件所有的角色及未保存草稿，允许替换只解锁手动选择。保存前审阅数量摘要、资源差异及逐项继承影响；退出候选模式必须明确迁移或重置资源。中途失败会保留已成功的前缀，不自动重试或承诺整体回滚。详见[批量操作契约](docs/ui-contract.md#progressive-batch-setup)。
+AI 建议说明当前模式下的模型、推理设置、候选用途和默认项，并展示采用前后的变化。不会批量修改其他角色。生成错误直接展示实际阶段和原因，长响应可展开查看；过期建议不能采用。详见[客户端与 Host 契约](docs/ui-contract.md)。
 
 定义优先级依次为：出厂默认 → 插件自有的用户覆盖项 → `customAgentDirs` 配置目录 → 活动项目的 `.dsh/agentdeck` 目录。文件定义的角色应在源文件修改，或派生到新 ID。损坏的显式定义保持无效并给出诊断，不静默恢复为出厂内容。
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 3
 id: concise-reviewer
 extends: reviewer
 title:
@@ -133,21 +141,18 @@ title:
 instructions:
   append: |
     Focus on behavioral defects. Return file locations, triggers and fixes.
-context:
-  targetTokens: 16000
-  elasticTokens: 32000
 ```
 
-数组支持整体替换或 `add`／`remove`／`replace`；指令支持 `append`／`replace`。已有版本 1 定义保留原版本标识；版本 2 增加输出上限和候选池。
+数组支持整体替换或 `add`／`remove`／`replace`；指令支持 `append`／`replace`。版本 1／2 继续可读，并为新任务规范化为版本 3；旧输出与上下文配额不再生效。读取不会重写来源文件，历史运行快照保持原策略。
 
-### 模型、候选项与输出
+### 模型与候选项
 
-继承或固定模型的角色可在版本 2 中设置 `output.maxTokens`。输出优先级为：角色上限 → 父代理实际上限 → 宿主报告的原生默认值。清除继承覆盖项使用 `output: null`。
+角色使用原生模型参数继承与宿主上下文恢复策略。AgentDeck 不再配置输出上限、目标／弹性上下文预算或退出候选时的资源迁移。切到固定模型时带入默认候选，切到继承时恢复原生继承；所有修改先进入草稿。
 
 所有者可配置一个小型候选池：
 
 ```yaml
-schemaVersion: 2
+schemaVersion: 3
 id: bounded-reader
 extends: reader
 model:
@@ -160,14 +165,13 @@ model:
       model: your-authorized-model
       reasoning:
         mode: model-default
-      maxTokens: 4096
 reasoning:
   mode: model-default
 ```
 
-请替换为实际已配置且获授权的提供商／模型组合。每个池包含 1 至 3 个候选项和一个默认项；每项独立拥有输出及思考设置。使用角色 ID 和 `action: candidates` 调用 `scene_agent_catalog`，再将返回的 `revision` 及可选 `candidateId`／`candidateReason` 传入 `scene_agent_start`。省略候选项时使用默认项。过期、无效或未授权选择在启动前失败，不会尝试其他模型。
+请替换为实际已配置且获授权的提供商／模型组合。候选池至少一项，必须有默认项；每项包含用途和推理设置。使用角色 ID 和 `action: candidates` 调用 `scene_agent_catalog`，再把返回的 `revision` 与可选 `candidateId`／`candidateReason` 传入 `scene_agent_start`。省略候选项时使用默认项。过期、无效或未授权选择在原生启动前失败，不尝试其他模型。
 
-提供商、模型 ID 和思考等级来自宿主适配器。模型发现、会话授权、参数校验、实际提示词准入是不同检查。未知输出或窗口保持未知。输出上限针对单次请求，不是金额或累计用量预算。
+模型目录与可选元数据只用于展示，不是 AI 生成建议的提前禁用条件。生成器按用户所选路由实际调用，错误保留原因与响应。子任务执行继续由原生模型授权和参数校验负责；未知模型窗口保持未知。
 
 ### 插件选项
 
@@ -179,13 +183,13 @@ projectConfigDirectory: .dsh/agentdeck
 allowNativeFallback: true
 ```
 
-受约束的兜底仅适用于未修改的出厂 `general`，且必须在任何委派发生前、完整组合无法加载时触发。它使用持久化的最小原生预设，保留角色指令、叶子限制、技能、模型／输出策略和隔离压缩。可选工具可能缺失，结果会明确说明。它不重试原生策略拒绝、容量拒绝、不确定启动或已接受子代理。
+受约束的兜底仅适用于未修改的出厂 `general`，且必须在任何委派发生前、完整组合无法加载时触发。持久化最小原生预设保留角色指令、叶子限制、技能、模型设置和宿主恢复继承。缺失的可选工具会明确报告；不重试原生拒绝、不确定启动或已接受的子代理。
 
 ## 上下文恢复与浏览器支持
 
-目标和弹性预算统计**每次请求的全部输入**，包括指令、工具、技能、历史及待处理材料。已知上下文窗口扣除输出预留和自适应余量。固定提示词及工具成本在子代理内测量；实际组装前，页面不承诺可用材料容量。
+新任务不再设独立的角色输入或输出配额。实际窗口和参数遵循原生模型选择与继承规则，自动压缩使用宿主已有服务。历史 policyVersion: 1 快照继续按原限制恢复；新任务使用无配额的 policyVersion: 2。
 
-每份快照配置原生隔离压缩和有界溢出恢复。宿主压缩集成可能覆盖原生策略；AgentDeck 不绕过它们，也不增加第二套压缩器。无法修复的输入会给出诊断，不重试原任务原文。
+原生恢复可在请求前压缩历史，也可在供应商报告标准上下文超限后缩减历史并重试当前请求，保持同一子会话与已有工具结果。无法缩减的固定输入仍可能失败。输出截断保留文本并标记不完整，可在原子任务继续，不误报完成。
 
 浏览器角色在首个模型请求前选择一个已准入后端：
 

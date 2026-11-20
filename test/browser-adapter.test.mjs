@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { activateBrowserSkill, browserInvocationDenial, browserToolAllowed, inspectBrowserSupport } from '../src/host/browser.ts';
+import { activateBrowserSkill, browserInvocationDenial, browserToolAllowed, inspectBrowserSupport } from '../lib/host/browser.js';
 
 const capabilities = ['browser-observe', 'browser-interact'];
 const chrome = suffix => `mcp__chrome-devtools__${suffix}`;

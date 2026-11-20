@@ -14,8 +14,8 @@ import { roleChoice } from '../lib/host/selection.js';
 
 const factory = loadBuiltinAgents().find(role => role.id === 'reader');
 const pool = () => [
-  { id: 'fast', purpose: 'Read a bounded source.', provider: 'p', model: 'm', reasoning: { mode: 'model-default' }, maxTokens: 6000 },
-  { id: 'deep', purpose: 'Compare a large source collection.', provider: 'q', model: 'large', reasoning: { mode: 'fixed', effort: 'high' }, maxTokens: 20_000 },
+  { id: 'fast', purpose: 'Read a bounded source.', provider: 'p', model: 'm', reasoning: { mode: 'model-default' } },
+  { id: 'deep', purpose: 'Compare a large source collection.', provider: 'q', model: 'large', reasoning: { mode: 'fixed', effort: 'high' } },
 ];
 const autoRole = (model = {}) => validateAgent({ ...factory, schemaVersion: 2,
   model: { mode: 'auto', candidates: pool(), defaultCandidate: 'fast', ...model }, reasoning: { mode: 'model-default' } });
@@ -42,6 +42,7 @@ async function fixture() {
     root.provide('tools', { definitions: () => [], schemas: () => [], resolve: async () => ({ dispose() {} }) });
     root.provide('agents', { list: () => [actor], get: id => id === actor.id ? actor : undefined });
     root.provide('subagents', { getProvider: () => ({}), rootOf: agent => agent });
+    root.provide('sessionQuery', { observeSession: async () => ({ events: [], [Symbol.dispose]() {} }) });
     root.provide('agentPresets', { resolve: async id => ({ id }), register: async () => async () => {} });
     root.provide('fs', {});
     root.provide('workingDirectory', { get: () => directory });
@@ -64,12 +65,12 @@ async function fixture() {
   return { actor, calls, directory,
     get root() { return root; }, get store() { return store; }, get controller() { return controller; },
     allow(routes) {
-      root.provide('sessionQuery', { observeSession: async id => {
+      root.get('sessionQuery').observeSession = async id => {
         assert.equal(id, actor.id);
         calls.observations++;
-        return { events: [{ type: 'subagent/model-selection-policy', data: { allowedModels: routes } }],
+        return { events: routes === undefined ? [] : [{ type: 'subagent/model-selection-policy', data: { allowedModels: routes } }],
           [Symbol.dispose]() { calls.disposed++; } };
-      } });
+      };
     },
     async reopen() { await controller.dispose(); await root.fiber.dispose(); await activate(); },
     async close() {
@@ -89,43 +90,57 @@ function assertNoDirectory(calls) {
   assert.deepEqual(calls.directory, []);
 }
 
-function assertDeclared(preview, route, maximum, source, safeInputTokens) {
-  assert.deepEqual(preview.configuredSelection, { ...route, maxTokens: maximum });
+function assertDeclared(preview, route) {
+  assert.deepEqual(preview.configuredSelection, route);
   assert.equal(preview.effectiveSelection, undefined);
   assert.equal(preview.model.metadataResolved, true);
   assert.equal(preview.model.authorized, null);
   assert.deepEqual(preview.authorization, { status: 'unknown' });
-  assert.deepEqual(preview.output, { configuredMaxTokens: maximum, effectiveMaxTokens: undefined, source, validated: false });
-  assert.deepEqual(preview.capacity, { kind: 'configured', assemblyChecked: false });
-  assert.equal(preview.budget.known, true);
-  assert.equal(preview.budget.safeInputTokens, safeInputTokens);
-  assert.equal(preview.budget.materialTokens, undefined);
+  assert.deepEqual(preview.recovery, { policy: 'native', contextWindow: route.provider === 'q' ? 131072 : 32768 });
+  for (const field of ['output', 'capacity', 'budget']) assert.equal(Object.hasOwn(preview, field), false);
 }
+
+test('unknown Session policy stays unknown in preview and blocks inherited task admission with its own code', async () => {
+  const f = await fixture();
+  try {
+    f.allow({ unsupported: true });
+    const preview = await f.controller.preview('reader', f.actor);
+    assert.equal(preview.authorization.status, 'unknown');
+    await assert.rejects(f.controller.start({ role: 'reader', prompt: 'Read the authorized source.' },
+      { agent: f.actor, callId: 'unknown-policy', signal: new AbortController().signal }), error => {
+        assert.equal(error.code, 'AGENTDECK_MODEL_POLICY_UNKNOWN');
+        assert.equal(error.details.status, 'unknown');
+        return true;
+      });
+    assert.equal(f.calls.config.length, 0, 'Unknown policy must stop admission before native parameter resolution or dispatch');
+    assertNoDirectory(f.calls);
+  } finally { await f.close(); }
+});
 
 test('auto choice requires a current revision and uses candidate policy without parent effort or cap', () => {
   const role = autoRole();
   const revision = agentRevision(role);
   assert.throws(() => roleChoice(role, parent, {}, true), /requires the role revision/);
   const selected = roleChoice(role, parent, { revision }, true);
-  assert.deepEqual(selected, { configured: { provider: 'p', model: 'm', maxTokens: 6000 }, explicit: true,
-    outputSource: 'candidate', decision: { candidateId: 'fast', roleRevision: revision, source: 'default' } });
+  assert.deepEqual(selected, { configured: { provider: 'p', model: 'm' }, explicit: true,
+    outputSource: 'native-default', decision: { candidateId: 'fast', roleRevision: revision, source: 'default' } });
   assert.equal(selected.configured.reasoningEffort, undefined);
   assert.deepEqual(roleChoice(role, undefined).configured, selected.configured, 'No Session is needed to read authored candidate policy.');
 });
 
-test('a recommended candidate pins route, effort, output and bounded decision provenance', () => {
+test('a recommended candidate pins route, effort and bounded decision provenance', () => {
   const role = autoRole();
   const revision = agentRevision(role);
   const candidateReason = 'The source comparison needs the configured deep candidate.';
   const choice = roleChoice(role, parent, { revision, candidateId: 'deep', candidateReason,
     provider: 'q', model: 'large', reasoning_effort: 'high' }, true);
-  assert.deepEqual(choice.configured, { provider: 'q', model: 'large', reasoningEffort: 'high', maxTokens: 20_000 });
+  assert.deepEqual(choice.configured, { provider: 'q', model: 'large', reasoningEffort: 'high' });
   assert.deepEqual(choice.decision, { candidateId: 'deep', roleRevision: revision, source: 'recommended', reason: candidateReason });
-  assert.equal(choice.outputSource, 'candidate');
+  assert.equal(choice.outputSource, 'native-default');
   assert.equal(roleChoice(role, parent, { revision, candidateId: 'deep', candidateReason: 'x'.repeat(240) }, true).decision.reason.length, 240);
 });
 
-test('stale or conflicting auto selections fail instead of changing candidate or output policy', () => {
+test('stale or conflicting auto selections fail instead of changing candidate or native settings', () => {
   const role = autoRole();
   const revision = agentRevision(role);
   const cases = [
@@ -137,7 +152,7 @@ test('stale or conflicting auto selections fail instead of changing candidate or
     [{ candidateId: 'deep', provider: 'p', model: 'm' }, /route conflicts/],
     [{ candidateId: 'deep', reasoning_effort: 'low' }, /effort conflicts/],
     [{ candidateId: 'fast', reasoning_effort: 'low' }, /effort conflicts/],
-    [{ maxTokens: 1 }, /owner-configured/],
+    [{ maxTokens: 1 }, /native model settings/],
     [{ candidateReason: '' }, /non-empty string/],
     [{ candidateReason: 'x'.repeat(241) }, /max 240/],
   ];
@@ -153,20 +168,21 @@ test('legacy raw auto routes must uniquely identify one configured candidate', (
   const choice = roleChoice(role, parent, { revision, provider: 'q', model: 'large', reasoning_effort: 'high' }, true);
   assert.equal(choice.decision.candidateId, 'deep');
   assert.equal(choice.decision.source, 'legacy-route');
-  assert.equal(choice.configured.maxTokens, 20_000);
+  assert.equal(choice.configured.maxTokens, undefined);
   assert.throws(() => roleChoice(role, parent, { revision, provider: 'q', model: 'large', reasoning_effort: 'other' }, true), /exactly one configured candidate/);
 });
 
-test('inherit and fixed roles preserve compatible effort and honor a role cap above the parent cap', () => {
-  assert.deepEqual(roleChoice(factory, parent).configured, parent);
+test('inherit and fixed roles preserve compatible effort and ignore retired role caps', () => {
+  const { maxTokens, ...route } = parent;
+  assert.deepEqual(roleChoice(factory, parent).configured, route);
   const fixed = roleChoice(fixedRole(), parent);
-  assert.deepEqual(fixed.configured, { provider: 'q', model: 'large', maxTokens: 20_000 });
-  assert.equal(fixed.outputSource, 'role');
+  assert.deepEqual(fixed.configured, { provider: 'q', model: 'large' });
+  assert.equal(fixed.outputSource, 'parent');
   const inherited = validateAgent({ ...factory, schemaVersion: 2, output: { maxTokens: 20_000 } });
-  assert.deepEqual(roleChoice(inherited, parent).configured, { ...parent, maxTokens: 20_000 });
+  assert.deepEqual(roleChoice(inherited, parent).configured, route);
   assert.throws(() => roleChoice(factory, parent, { candidateId: 'fast' }), /only by an auto role/);
   assert.throws(() => roleChoice(factory, parent, { candidateReason: 'choose fast' }), /only by an auto role/);
-  assert.throws(() => roleChoice(factory, parent, { maxTokens: 5000 }), /owner-configured/);
+  assert.throws(() => roleChoice(factory, parent, { maxTokens: 5000 }), /native model settings/);
 });
 
 test('catalog exposes a fixed default route denial before dispatch without model discovery', async () => {
@@ -180,7 +196,7 @@ test('catalog exposes a fixed default route denial before dispatch without model
     assert.equal(listed.authorization.code, 'AGENTDECK_MODEL_NOT_AUTHORIZED');
     assert.equal(listed.authorization.policy, 'parent-only');
     assert.deepEqual(listed.authorization.allowedModels, [{ provider: 'p', model: 'm' }]);
-    assert.deepEqual(listed.configuredSelection, { provider: 'q', model: 'large', maxTokens: 1000 });
+    assert.deepEqual(listed.configuredSelection, { provider: 'q', model: 'large' });
     const preview = await f.controller.preview('reader', f.actor);
     assert.deepEqual(preview.authorization, listed.authorization);
     assert.equal(preview.agent.available, false);
@@ -242,7 +258,7 @@ test('auto default authorization does not select another allowed candidate', asy
   } finally { await f.close(); }
 });
 
-test('fixed and auto previews without a Session retain declarations and configured capacity', async () => {
+test('fixed and auto previews without a Session retain declarations and actual model capacity', async () => {
   const f = await fixture();
   try {
     let saved = await f.controller.save({ id: 'reader', text: definition({ model: { mode: 'fixed', provider: 'q', model: 'large' }, output: { maxTokens: 20_000 } }) });
@@ -261,23 +277,19 @@ test('fixed and auto previews without a Session retain declarations and configur
   } finally { await f.close(); }
 });
 
-test('inherited previews without a Session stay unknown while a fixed model can declare its default output', async () => {
+test('inheritance without a Session stays unknown and fixed previews show actual model capacity', async () => {
   const f = await fixture();
   try {
     const inherited = await f.controller.preview('reader');
     assert.equal(inherited.configuredSelection, undefined);
     assert.equal(inherited.model, undefined);
-    assert.equal(inherited.budget.known, false);
-    assert.deepEqual(inherited.capacity, { kind: 'unknown', assemblyChecked: false });
+    assert.equal(inherited.recovery.policy, 'native');
     assert.deepEqual(f.calls.metadata, []);
     await f.controller.save({ id: 'reader', text: definition({ model: { mode: 'fixed', provider: 'q', model: 'large' } }) });
     const fixed = await f.controller.preview('reader');
     assert.deepEqual(fixed.configuredSelection, { provider: 'q', model: 'large' });
-    assert.equal(fixed.output.source, 'native-default');
-    assert.equal(fixed.output.validated, false);
     assert.equal(fixed.effectiveSelection, undefined);
-    assert.equal(fixed.budget.safeInputTokens, 120_518);
-    assert.deepEqual(fixed.capacity, { kind: 'configured', assemblyChecked: false });
+    assert.equal(fixed.recovery.contextWindow, 131072);
     assert.deepEqual(f.calls.config, []);
   } finally { await f.close(); }
 });
@@ -293,11 +305,9 @@ test('a denied selected route retains declaration metadata without claiming para
     assert.equal(preview.model.name, 'q/large declaration');
     assert.equal(preview.model.authorized, false);
     assert.equal(preview.model.contextWindow, 131_072);
-    assert.deepEqual(preview.configuredSelection, { provider: 'q', model: 'large', reasoningEffort: 'high', maxTokens: 20_000 });
+    assert.deepEqual(preview.configuredSelection, { provider: 'q', model: 'large', reasoningEffort: 'high' });
     assert.equal(preview.effectiveSelection, undefined);
-    assert.deepEqual(preview.capacity, { kind: 'configured', assemblyChecked: false });
-    assert.equal(preview.output.validated, false);
-    assert.equal(preview.budget.safeInputTokens, 104_518);
+    assert.deepEqual(preview.recovery, { policy: 'native', contextWindow: 131072 });
     assert.deepEqual(f.calls.config, []);
     assert.equal(f.calls.observations, 1);
     assert.equal(f.calls.disposed, 1);
@@ -305,25 +315,20 @@ test('a denied selected route retains declaration metadata without claiming para
   } finally { await f.close(); }
 });
 
-test('authorized role and candidate output caps reach native parameter resolution above the parent cap', async () => {
+test('legacy role and candidate caps stay inactive while previews follow native parent inheritance', async () => {
   const f = await fixture();
   try {
     f.allow([{ provider: 'p', model: 'm' }, { provider: 'q', model: 'large' }]);
     let saved = await f.controller.save({ id: 'reader', text: definition({ output: { maxTokens: 20_000 } }) });
     const inherited = await f.controller.preview('reader', f.actor);
-    assert.equal(inherited.effectiveSelection.maxTokens, 20_000);
-    assert.equal(inherited.output.source, 'role');
-    assert.equal(inherited.output.validated, true);
-    assert.equal(inherited.budget.safeInputTokens, 11_129);
+    assert.equal(inherited.effectiveSelection.maxTokens, parent.maxTokens);
     saved = await f.controller.save({ id: 'reader', expectedRevision: saved.revision, text: definition(autoPatch()) });
     const selected = await f.controller.preview('reader', f.actor, undefined, { candidateId: 'deep' });
-    assert.deepEqual(selected.effectiveSelection, { provider: 'q', model: 'large', reasoningEffort: 'high', maxTokens: 20_000 });
+    assert.deepEqual(selected.effectiveSelection, { provider: 'q', model: 'large', reasoningEffort: 'high', maxTokens: parent.maxTokens });
     assert.equal(selected.authorization.status, 'authorized');
-    assert.deepEqual(selected.capacity, { kind: 'validated-parameters', assemblyChecked: false });
-    assert.deepEqual(selected.output, { configuredMaxTokens: 20_000, effectiveMaxTokens: 20_000, source: 'candidate', validated: true });
-    assert.deepEqual(f.calls.config, [{ ...parent, maxTokens: 20_000 }, { provider: 'q', model: 'large', reasoningEffort: 'high', maxTokens: 20_000 }]);
+    assert.deepEqual(f.calls.config, [parent, { provider: 'q', model: 'large', reasoningEffort: 'high', maxTokens: parent.maxTokens }]);
     assert.equal(f.actor.options.maxTokens, 1000);
-    assert.equal(selected.budget.materialTokens, undefined);
+    assert.equal(Object.hasOwn(selected.configuredSelection, 'maxTokens'), false);
     assertNoDirectory(f.calls);
     assert.ok(saved.revision);
   } finally { await f.close(); }
@@ -338,8 +343,8 @@ test('native parameter rejection remains an unvalidated configured preview', asy
     assert.equal(preview.authorization.status, 'authorized');
     assert.equal(preview.model.metadataResolved, true);
     assert.equal(preview.effectiveSelection, undefined);
-    assert.equal(preview.output.validated, false);
-    assert.deepEqual(preview.capacity, { kind: 'configured', assemblyChecked: false });
+    assert.equal(preview.effectiveSelection, undefined);
+    assert.equal(preview.recovery.policy, 'native');
     assert.match(preview.diagnostics.join('\n'), /Native parameter validation: Configured output exceeds this model output limit/);
   } finally { await f.close(); }
 });
@@ -373,7 +378,7 @@ test('owner saves and resets preserve other resolved roles inside the write queu
   try {
     const base = await save('custom-base', { extends: 'reader' });
     // Queue the child first so the following write must validate against the serialized state.
-    const childWrite = save('custom-child', { extends: 'custom-base', output: { maxTokens: 2000 } });
+    const childWrite = save('custom-child', { extends: 'custom-base', reasoning: { mode: 'fixed', effort: 'high' } });
     const resetBase = assert.rejects(reset('custom-base', base.revision), /invalidates derived agents: custom-child/);
     const child = await childWrite;
     await resetBase;
@@ -393,11 +398,11 @@ for (const action of ['save', 'reset']) {
     const save = (id, patch, expectedRevision) => f.controller.operation('save', { id, text: text(id, patch), expectedRevision }, f.actor);
     try {
       const base = await save('custom-base', { extends: 'reader' });
-      await save('custom-child', { extends: 'custom-base', output: { maxTokens: 2000 } });
+      await save('custom-child', { extends: 'custom-base', reasoning: { mode: 'fixed', effort: 'high' } });
       const project = join(f.directory, '.dsh', 'agentdeck');
       await mkdir(project, { recursive: true });
       // Reset can remove a shadowed base. Save needs an unshadowed target,
-      // so instead mask the child whose output cap conflicts with the new auto mode.
+      // so instead mask the child whose fixed reasoning conflicts with the new auto mode.
       const shadowId = action === 'reset' ? 'custom-base' : 'custom-child';
       await writeFile(join(project, `${shadowId}.yaml`), text(shadowId, { extends: 'reader' }));
       const mutation = action === 'reset'
@@ -408,27 +413,6 @@ for (const action of ['save', 'reset']) {
     } finally { await f.close(); }
   });
 }
-
-test('batch setup rejects a masked global role loss even when a later row restores it', async () => {
-  const f = await fixture();
-  const text = (id, patch) => JSON.stringify({ schemaVersion: 2, id, ...patch });
-  try {
-    const middle = await f.controller.save({ id: 'custom-middle', text: text('custom-middle', { extends: 'reader' }) });
-    const child = await f.controller.save({ id: 'custom-child', text: text('custom-child', { extends: 'custom-middle', output: { maxTokens: 2000 } }) });
-    const project = join(f.directory, '.dsh', 'agentdeck');
-    await mkdir(project, { recursive: true });
-    await writeFile(join(project, 'custom-child.yaml'), text('custom-child', { extends: 'general' }));
-    const { agents } = await f.controller.catalog(f.actor);
-    const row = (id, patch, expectedRevision) => ({ id, text: text(id, patch), expectedRevision, roleRevision: agents.find(role => role.id === id).revision });
-    const rows = [row('custom-middle', { extends: 'general' }, middle.revision), row('reader', autoPatch())];
-    const lost = /invalidates derived agents: custom-child/;
-    await assert.rejects(f.controller.operation('previewSetup', { rows, setupPolicy: { scopePolicy: 'replace-selected' } }, f.actor), lost);
-    await assert.rejects(f.controller.operation('applySetup', { rows }, f.actor), lost);
-    assert.equal(f.store.getOverride('reader'), undefined);
-    assert.deepEqual(f.store.getOverride('custom-middle'), middle);
-    assert.deepEqual(f.store.getOverride('custom-child'), child);
-  } finally { await f.close(); }
-});
 
 test('native JSON storage retains candidate decision and pinned snapshot fields across a fresh runtime', async () => {
   const f = await fixture();

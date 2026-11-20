@@ -1,7 +1,7 @@
 # DSH AgentDeck
 
 [![DSH plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-2563eb)](https://github.com/deepseek-ai/deepseek-harness)
-[![DSH compatibility](https://img.shields.io/badge/DSH-0.2.2--rc.3-blue)](package.json)
+[![DSH compatibility](https://img.shields.io/badge/DSH-%3E%3D0.2.2--rc.1-blue)](package.json)
 [![CI](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/oh-dsh-plugins/dsh-agentdeck/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/dsh-agentdeck)](https://www.npmjs.com/package/dsh-agentdeck)
@@ -15,8 +15,8 @@ A third-party plugin for DeepSeek Harness (DSH) that provides ready-to-use scene
 - **16 complete agents:** 13 general-purpose roles and three specialist variants, each with instructions, expected inputs, deliverables, skills and tool capabilities.
 - **Native delegation:** retain DSH authorization, caller identity, cancellation, persistence, completion notifications and Agent Teams coexistence.
 - **Native settings page:** manage agents, tasks/results and diagnostics in English or Simplified Chinese, using the host's light and dark themes.
-- **Real model choices:** discover configured providers, model IDs and supported reasoning levels; inherit the parent model, choose a fixed route, or configure up to three inline candidates with a default.
-- **Explicit resource settings:** per-role or per-candidate output caps, total-input context budgets, bounded native recovery and clear unknown-capacity diagnostics.
+- **Real model choices:** discover configured providers, models and reasoning levels; inherit, select a fixed route or use a candidate pool with a default.
+- **Per-role AI suggestions:** choose an independent generator and adopt model/reasoning settings into a draft; new tasks inherit native context recovery without separate quotas.
 - **Extensible definitions:** derive roles, edit YAML, import/export, reset overrides and add user/project definition directories. Running tasks keep their original snapshots.
 - **Scoped tools:** 16 bundled skills and four standard-library helper scripts; browser sessions belong to the exact child that created them.
 
@@ -26,8 +26,8 @@ AgentDeck does not add a classifier model or a separate execution loop. Configur
 
 | Component | Supported baseline |
 | --- | --- |
-| AgentDeck | `0.2.12` |
-| DeepSeek Harness | **`0.2.2-rc.3`**; other versions are not claimed compatible |
+| AgentDeck | `0.3.0` |
+| DeepSeek Harness | **`>=0.2.2-rc.1`**; published-host verification covers `rc.1` through `rc.5`; future releases require the same behavior checks |
 | Node.js | `>=24.9.0` |
 | Development environment | DSH CLI on `PATH`; the host-link helper uses a POSIX shell |
 | Optional capabilities | Existing web providers, native tools, or a supported browser integration |
@@ -39,18 +39,18 @@ DSH supplies its own peer packages. Do not independently upgrade them inside an 
 Install the release from npm into a compatible DSH profile:
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.2.12
+dsh plugin --profile web add dsh-agentdeck@0.3.0
 ```
 
 Use your actual profile name instead of `web`. The DSH plugin manager installs the package and applies its native bundle patch. Restart DSH when the manager requests it, then refresh the existing Harness page.
 
 ### GitHub Release archive
 
-Download `dsh-agentdeck-0.2.12.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
+Download `dsh-agentdeck-0.3.0.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.2.12.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.3.0.tgz
 ```
 
 ### Build from source
@@ -65,7 +65,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.2.12.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.3.0.tgz
 ```
 
 Use your actual profile name instead of `web`. `dev:link-host` locates the installed DSH CLI and links its existing public peer packages into this checkout; it does not edit the host or active profile. Set `AGENTDECK_DSH_ROOT` to the installed DSH package directory if the CLI is elsewhere.
@@ -80,6 +80,14 @@ Restart DSH when the plugin manager reports that a restart is required, then ref
 4. Read the native completion notification. Open task details or request paged results only when more evidence is needed.
 
 Known-file edits and short tasks can stay inline. Missing dependencies, disabled roles and invalid explicit role IDs produce diagnostics rather than silently selecting another specialist.
+
+### Move model settings between machines
+
+In **Settings → AgentDeck → Agents**, choose **Export model settings** and select the roles to include. The JSON file contains saved model modes, reasoning settings, candidate IDs, purposes, ordering and defaults. It does not include provider connections, credentials, paths, instructions or skills. Unsaved drafts are not exported.
+
+On the other machine, leave **Session context** unselected and choose **Import model settings**. Review each destination role and map missing providers, models or unsupported reasoning efforts to local choices. Uncheck roles to skip them, or skip individual candidates while keeping at least one and explicitly choosing a replacement before removing the default. Inherited settings follow the destination machine's configuration. Missing role IDs require an explicit destination; source-owned roles must be edited at their source.
+
+Choose **Preview changes**, review the before/after configuration, then **Stage drafts**. Save each role through its normal Save button; current revisions and inheritance impacts are checked again. Existing unsaved drafts are protected. The file transfers preferences and does not grant model authorization.
 
 ### Included agents
 
@@ -117,14 +125,14 @@ Native completion arrives asynchronously. AgentDeck child IDs and Agent Teams me
 
 ## Customization
 
-The owner settings page supports enable/disable, actual provider/model/reasoning selects, output and input budgets, YAML editing, derivation, import/export and reset. Save conflicts preserve drafts. Changes apply to new starts; running tasks retain their original role, skills, helper revisions and selected model.
+The owner settings page supports enable/disable, actual provider/model/reasoning choices, YAML editing, derivation, import/export and reset. Fixed and candidate modes offer AI suggestions inside each role editor. Choose the generator independently without selecting a Session; adopting changes only the draft until normal Save. Running tasks retain their original snapshots.
 
-**Batch setup** progressively offers Session inheritance, a fixed model, or one shared pool of 1–3 independently configured candidates. Matching inheritance needs no save. Existing overrides, disabled/source-owned roles and dirty drafts are protected by default; allowing replacement only unlocks manual selection. Review the counts, resource differences and each indirect inherited impact before saving. Leaving candidate mode requires an explicit resource migration or reset. Saves retain successful prefixes on failure; there is no automatic replay or all-or-nothing rollback. See the [batch operation contract](docs/ui-contract.md#progressive-batch-setup).
+Suggestions explain routes, reasoning, candidate purposes and defaults in the current mode, with before/after values. They do not batch-edit other roles. Failures expose the stage and actual cause, with expandable raw response; stale results cannot be adopted. See the [Client and Host contract](docs/ui-contract.md).
 
 Definition precedence is factory defaults → plugin-owned user overrides → configured `customAgentDirs` → the active project's `.dsh/agentdeck` directory. Edit a file-owned role in its source or derive it to a new ID. Broken explicit definitions stay invalid with diagnostics; they do not revert silently to factory content.
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 3
 id: concise-reviewer
 extends: reviewer
 title:
@@ -133,21 +141,18 @@ title:
 instructions:
   append: |
     Focus on behavioral defects. Return file locations, triggers and fixes.
-context:
-  targetTokens: 16000
-  elasticTokens: 32000
 ```
 
-Arrays support replacement or `add`/`remove`/`replace`; instructions support `append`/`replace`. Existing version 1 definitions keep their revision identity. Version 2 adds output caps and candidate pools.
+Arrays support replacement or `add`/`remove`/`replace`; instructions support `append`/`replace`. Version 1/2 sources remain readable and normalize to version 3 for new tasks, without retired output/context quotas. Reads never rewrite source files; historical execution snapshots retain their original policy.
 
-### Models, candidates and output
+### Models and candidates
 
-Inherited/fixed roles can set `output.maxTokens` in version 2. Output precedence is role cap → parent effective cap → reported native default. Clearing an inherited override uses `output: null`.
+Roles use native model parameter inheritance and host context recovery. AgentDeck does not configure output caps, target/elastic input budgets or resource migration when leaving candidate mode. Switching to fixed seeds the default candidate; switching to inherit restores native inheritance. All edits enter the draft first.
 
 For a small owner-configured candidate pool:
 
 ```yaml
-schemaVersion: 2
+schemaVersion: 3
 id: bounded-reader
 extends: reader
 model:
@@ -160,14 +165,13 @@ model:
       model: your-authorized-model
       reasoning:
         mode: model-default
-      maxTokens: 4096
 reasoning:
   mode: model-default
 ```
 
-Replace the route with an actual configured, authorized provider/model pair. Each pool has one to three candidates and one default; each candidate owns its output and reasoning setting. Read `scene_agent_catalog` with `action: candidates` and the role ID, then pass the returned `revision` and optionally `candidateId`/`candidateReason` to `scene_agent_start`. An omitted candidate selects the default. Stale, invalid or unauthorized choices fail before startup and do not try another model.
+Use actual configured, authorized provider/model routes. A pool needs at least one candidate and a default; each candidate has a purpose and reasoning setting. Read `scene_agent_catalog` with `action: candidates` and the role ID, then pass its `revision` and optional `candidateId`/`candidateReason` to `scene_agent_start`. An omitted candidate selects the default. Stale, invalid or unauthorized choices fail before native startup without trying another route.
 
-Provider/model IDs and reasoning levels come from host adapters. Model discovery, Session authorization, parameter validation and actual prompt admission are separate checks. Unknown output/window values remain unknown. Output caps are per request, not monetary or cumulative usage budgets.
+Model directories and optional metadata inform the UI and do not pre-gate AI generation. The selected generator is actually called; failures preserve their cause and response. Child execution still uses native model authorization and parameter validation. Unknown model windows remain unknown.
 
 ### Plugin options
 
@@ -179,13 +183,13 @@ projectConfigDirectory: .dsh/agentdeck
 allowNativeFallback: true
 ```
 
-Guarded fallback applies only to the unchanged factory `general`, before any delegation, when its full composition cannot load. It retains the role's instructions, leaf guard, skills, model/output policy and isolated compaction in a persisted minimal native preset. Optional tools may be missing and are reported. It never retries native policy/capacity denials, uncertain starts or an already accepted child.
+Guarded fallback applies only to the unchanged factory general before delegation when its full composition cannot load. Its persisted minimal native preset retains instructions, leaf guard, skills, model settings and host recovery inheritance. Missing optional tools are reported. It never retries native denials, uncertain starts or an accepted child.
 
 ## Context recovery and browser support
 
-Target and elastic budgets count **all input per request**, including instructions, tools, skills, history and pending material. A known context window is reduced by output reservation and an adaptive margin. Fixed prompt/tool cost is measured in the child; the UI does not promise free material capacity before assembly.
+New tasks have no separate role input or output quota. Actual windows and parameters follow native model selection and inheritance, while automatic compaction uses the existing host service. Historical policyVersion: 1 snapshots restore their original limits; new tasks use resource-free policyVersion: 2.
 
-Each snapshot configures native isolated compaction and bounded overflow recovery. Host compression integrations may override native policy; AgentDeck does not bypass them or add a second compressor. Irreparable input fails with a diagnostic instead of retrying the unchanged task.
+Native recovery can compact history before a request and reduce history after a standard provider overflow before retrying the current request, preserving the same child and completed tool results. Irreducible fixed input can still fail. Output cutoff retains text and reports partial completion, allowing continuation in the same child.
 
 Browser roles select one admitted backend before their first model request:
 

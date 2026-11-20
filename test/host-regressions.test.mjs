@@ -12,7 +12,8 @@ import { AgentDeckStore, storeSpec } from '../lib/host/store.js';
 import { AgentDeckController } from '../lib/host/controller.js';
 import { readRunResult } from '../lib/host/results.js';
 import { missingCapabilities } from '../lib/host/capabilities.js';
-import { loadBuiltinAgents, resolveCatalog, resolveContextBudget } from '../lib/core/index.js';
+import nativeToolsPackage from '@deepseek-ai/dsh-tools/package.json' with { type: 'json' };
+import { loadBuiltinAgents, resolveCatalog } from '../lib/core/index.js';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'agentdeck-host-regression-'));
@@ -23,7 +24,8 @@ async function fixture() {
   const store = await AgentDeckStore.open(root);
   root.provide('tools', { definitions: () => [], schemas: () => [], resolve: async () => ({ dispose() {} }) });
   root.provide('agents', { list: () => [], get: () => undefined });
-  root.provide('subagents', { getProvider: () => ({}) });
+  root.provide('subagents', { getProvider: () => ({}), rootOf: agent => agent });
+  root.provide('sessionQuery', { observeSession: async () => ({ events: [], [Symbol.dispose]() {} }) });
   root.provide('agentPresets', { resolve: async id => ({ id }), register: async () => async () => {} });
   root.provide('fs', {});
   root.provide('workingDirectory', { get: () => directory });
@@ -134,22 +136,22 @@ test('provider-only discovery returns real filtered metadata and rejects model-o
   } finally { await f.close(); }
 });
 
-test('preview reserves the same output cap that native delegation inherits', async () => {
+test('preview reports native inherited parameters without a plugin quota', async () => {
   const f = await fixture();
   try {
     const preview = await f.controller.preview('reader', f.actor);
     assert.equal(preview.effectiveSelection.maxTokens, 10_000);
-    const role = loadBuiltinAgents().find(role => role.id === 'reader');
-    const expected = resolveContextBudget({ ...role.context, windowTokens: 32_768, outputTokens: 10_000 });
-    assert.equal(preview.budget.safeInputTokens, expected.safeInputTokens);
-    assert.equal(preview.budget.materialTokens, undefined, 'Unassembled fixed prompt/tool cost cannot be advertised as free material capacity.');
+    assert.equal(preview.recovery.policy, 'native');
+    assert.equal(preview.recovery.contextWindow, 32_768);
+    assert.equal(preview.budget, undefined);
+    assert.equal(preview.output, undefined);
   } finally { await f.close(); }
 });
 
 test('encoded script traversal is rejected before any privileged resource digest or child start', async () => {
   const f = await fixture();
   try {
-    await f.controller.save({ id: 'reader', text: 'schemaVersion: 1\nid: reader\nscripts:\n  - assets/scripts/%2e%2e/%2e%2e/scripts/link-host.mjs\n' });
+    await f.controller.save({ id: 'reader', text: 'schemaVersion: 1\nid: reader\nscripts:\n  - assets/scripts/%2e%2e/%2e%2e/README.md\n' });
     await assert.rejects(f.controller.start({ role: 'reader', prompt: 'Read the task.' }, { agent: f.actor, callId: 'encoded-script', signal: new AbortController().signal }), /outside the packaged scripts directory/);
     assert.equal(f.store.runs().length, 0);
     assert.equal(f.store.snapshots().length, 0);
@@ -168,14 +170,14 @@ test('catalog never audits historical presets; an individual result exposes its 
     await f.controller.catalog();
     assert.equal(reads, 0, 'Opening the role list must not create historical background audits');
     await f.store.run({ id: 'audit-one', roleId: 'reader', revision: 'snapshot', parentId: 'parent', childId: 'child', description: 'Read', createdAt: 1, phase: 'accepted' });
-    f.root.provide('sessionQuery', { readSession: async () => ({ events: [] }) });
+    f.root.get('sessionQuery').readSession = async () => ({ events: [] });
     const result = await f.controller.result({ childId: 'child' });
     assert.equal(reads, 1);
     assert.ok(result.diagnostics.some(item => /snapshot-preset.*missing dependency/.test(item)));
   } finally { await f.close(); }
 });
 
-test('no-Session budget preview does not wait for unrelated stored presets or providers', async () => {
+test('no-Session native recovery preview does not wait for unrelated stored presets or providers', async () => {
   const f = await fixture();
   let release;
   const gate = new Promise(done => { release = done; });
@@ -187,7 +189,8 @@ test('no-Session budget preview does not wait for unrelated stored presets or pr
     f.root.get('llm').listModels = async () => { throw new Error('No model listing is needed for this preview'); };
     const preview = await Promise.race([f.controller.preview('reader'), new Promise((_, reject) => setTimeout(() => reject(new Error('Preview waited for an unrelated preset')), 150))]);
     assert.equal(preview.agent.id, 'reader');
-    assert.equal(preview.budget.known, false);
+    assert.deepEqual(preview.recovery, { policy: 'native', contextWindow: undefined });
+    assert.equal(preview.budget, undefined);
     assert.equal(audits, 0);
   } finally { release(); await f.close(); }
 });
@@ -218,7 +221,7 @@ test('individual task diagnostics are bounded, deduplicate that preset and respe
     f.root.get('agentPresets').resolve = async id => { checks++; await gate; return { id }; };
     const started = performance.now();
     await f.store.run({ id: 'audit-pending', roleId: 'reader', revision: 'pending', parentId: 'parent', childId: 'child', description: 'Read', createdAt: 1, phase: 'accepted' });
-    f.root.provide('sessionQuery', { readSession: async () => ({ events: [] }) });
+    f.root.get('sessionQuery').readSession = async () => ({ events: [] });
     const reads = await Promise.all([f.controller.result({ childId: 'child' }), f.controller.result({ childId: 'child' })]);
     assert.ok(performance.now() - started < 1000, 'Unrelated Loader work must not hold task diagnostic reads');
     assert.equal(checks, 1);
@@ -242,8 +245,9 @@ test('live Session choices retain ordinary forks and exclude delegated children 
     f.root.get('subagents').rootOf = agent => agent === child ? root : agent;
     const catalog = await f.controller.catalog();
     assert.deepEqual(catalog.sessions.map(session => session.id), [root.id, fork.id]);
-    assert.equal(catalog.runtime.compatibilityVersion, '0.2.2-rc.3');
-    assert.equal(catalog.runtime.version, undefined, 'The compatibility target is not a measured runtime version');
+    assert.equal(catalog.runtime.compatibilityVersion, nativeToolsPackage.version);
+    assert.equal(catalog.runtime.minimumVersion, '0.2.2-rc.1');
+    assert.equal(catalog.runtime.rootDiscovery, 'tree');
   } finally { await f.close(); }
 });
 
@@ -253,10 +257,10 @@ test('missing native catalog projection retains uncertain startup and disposes t
     await f.store.run({ id: 'uncertain-read', roleId: 'reader', revision: 'old', parentId: 'parent', description: 'Uncertain task', createdAt: 1, phase: 'uncertain' });
     let disposed = 0;
     const signal = new AbortController().signal;
-    f.root.provide('sessionQuery', { observeSession: async (id, options) => {
+    f.root.get('sessionQuery').observeSession = async (id, options) => {
       assert.equal(id, 'parent'); assert.equal(options.signal, signal);
       return { projections: { values: {} }, [Symbol.dispose]() { disposed++; } };
-    } });
+    };
     const { runs } = await f.controller.runs(undefined, signal);
     assert.equal(runs[0].phase, 'uncertain');
     assert.equal(runs[0].childId, undefined);
@@ -269,7 +273,7 @@ test('missing native catalog projection retains uncertain startup and disposes t
 const report = { status: 'completed', summary: 'Previous work complete', evidence: ['old'] };
 const turn = (type, data = {}) => ({ type, data });
 const assistant = value => turn('assistant/message', { message: { content: [{ type: 'text', text: JSON.stringify(value) }] } });
-const resultContext = events => ({ sessionQuery: { readSession: async () => ({ events }) }, agents: { get: () => undefined } });
+const resultContext = events => ({ events: async () => events, status: () => undefined });
 const run = { id: 'r', childId: 'child', parentId: 'parent', roleId: 'reader', revision: 'rev', description: 'Read', createdAt: 1, phase: 'accepted' };
 
 test('latest cancelled or running turn cannot inherit an older completed report', async () => {

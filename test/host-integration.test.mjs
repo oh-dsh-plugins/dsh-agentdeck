@@ -11,88 +11,17 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json';
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain';
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local';
 import TokenMeter from '@deepseek-ai/dsh-token-meter';
+import BasicCompaction from '@deepseek-ai/dsh-compaction-basic';
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { LlmError } from '@deepseek-ai/dsh-llm';
 import * as AgentDeck from '../lib/index.js';
 import { textRevision } from '../lib/host/store.js';
 import {
   CHILD_TEXT, ROUTE, bounded, createNativeHarness, deferred, noticeMessages,
 } from '../scripts/probe-native.mjs';
 
+import { fixture, text, success, ownerSave, start } from '../scripts/fixture-host.mjs';
 let serial = 0;
-async function fixture({ holdChild = false, subprocess = true, allowNativeFallback = false, policy, web = false } = {}) {
-  const h = await createNativeHarness({ holdChild, policy });
-  const webCalls = [];
-  const webReadyCalls = [];
-  let hostFiber;
-  try {
-    // Loader may write a resolver helper into its package scope. Keep that scope
-    // task-owned while resolving the existing installed DSH dependency closure.
-    const hostModules = dirname(dirname(dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-tools/package.json')))));
-    await writeFile(join(h.storageRoot, 'package.json'), JSON.stringify({ name: 'agentdeck-host-native-fixture', type: 'module', private: true }));
-    await symlink(hostModules, join(h.storageRoot, 'node_modules'), 'dir');
-    const ctx = h.ctx.extend({ baseUrl: pathToFileURL(join(h.storageRoot, 'package.json')).href });
-    await bounded(ctx.plugin(Loader, { baseUrl: ctx.baseUrl }), 'Host Loader setup');
-    // The real application bootstrap supplies this public Loader builtin.
-    ctx.get('loader').builtins.group = Group;
-    await bounded(ctx.plugin(Storage), 'native storage hub');
-    await bounded(ctx.plugin(StorageJson, { root: join(h.storageRoot, 'agentdeck-data') }), 'native JSON storage');
-    await bounded(ctx.plugin(StorageDomain, { backend: 'json' }), 'native storage domain');
-    await bounded(ctx.plugin(SkillRegistry), 'native skills');
-    await bounded(ctx.plugin(TokenMeter), 'native token meter');
-    if (subprocess) await bounded(ctx.plugin(LocalSubprocess), 'native subprocess');
-    if (web) {
-      const { default: WebRuntime } = await import('@deepseek-ai/dsh-web');
-      await bounded(ctx.plugin(WebRuntime, { fetchProvider: 'fixture-local-fetch' }), 'native web service');
-      ctx.get('web').registerFetchProvider({
-        id: 'fixture-local-fetch',
-        available: () => true,
-        async ready(llmProvider) { webReadyCalls.push(llmProvider); return llmProvider === ROUTE.provider; },
-        async fetch(request, signal) {
-          signal?.throwIfAborted();
-          webCalls.push({ request, signal });
-          return { url: request.url, statusCode: 200, body: { kind: 'text', content: 'Deterministic local web evidence.' }, truncated: false };
-        },
-      });
-    }
-    await bounded(ctx.plugin(AgentPresetRegistry, { default: 'fixture-standard' }), 'native preset registry');
-    const presets = ctx.get('agentPresets');
-    await bounded(presets.register({ id: 'fixture-standard', name: 'Fixture parent', plugins: web ? [
-      { id: 'fixture-parent-web', name: '@deepseek-ai/dsh-tool-web', config: { search: false, fetch: true } },
-    ] : [] }), 'parent preset');
-    if (web) await bounded(presets.select(h.parent, 'fixture-standard'), 'parent scoped web consumer');
-    h.parent.options.maxTokens = 1536;
-    const config = { customAgentDirs: [], projectConfigDirectory: '.dsh/agentdeck', allowNativeFallback };
-    const mountHost = async () => {
-      hostFiber = ctx.plugin(AgentDeck, config);
-      await bounded(hostFiber, 'actual AgentDeck Host plugin');
-    };
-    await mountHost();
-    const call = async (name, args = {}, { id = `host-call-${++serial}`, agent = h.parent, signal = new AbortController().signal, toolSet } = {}) => {
-      const batch = await bounded(ctx.tools.execute({
-        calls: [{ type: 'tool-call', id, name, arguments: JSON.stringify(args) }], agent, signal,
-        ...(toolSet === undefined ? {} : { toolSet }),
-      }), `Host pipeline ${name}`, 15_000);
-      assert.equal(batch.results.length, 1);
-      return batch.results[0].result;
-    };
-    return {
-      h, ctx, call, presets, webCalls, webReadyCalls,
-      domain: () => ctx.get('storageDomain').get('dsh_agentdeck'),
-      async reloadHost() { await hostFiber.dispose(); await mountHost(); },
-      async close() { try { await hostFiber?.dispose(); } finally { await h.close(); } },
-    };
-  } catch (error) {
-    try { await hostFiber?.dispose(); } finally { await h.close(); }
-    throw error;
-  }
-}
-const text = result => result.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
-function success(result) { assert.equal(result.isError, false, text(result)); return result.value; }
-// Seed task-owned configuration for native behavior tests without mounting the owner RPC.
-const ownerSave = (f, id, text) => f.domain().table('overrides').put(id, { id, text, revision: textRevision(text), updatedAt: Date.now() });
-const start = (f, fields = {}, options) => f.call('scene_agent_start', {
-  role: 'reader', prompt: 'Read only the authorized fixture evidence and report what was verified.', ...fields,
-}, options);
 
 // Deliberately imports the complete lib/index.js Host entry. Narrow controller
 // tests cannot establish that its domain, dependency graph or preset can mount.
@@ -121,7 +50,8 @@ test('actual Host entry, JSON domain and native preset start one guarded child w
     assert.ok(names.includes('glob'));
     assert.ok(names.includes('agentdeck_skill'));
     for (const forbidden of ['write', 'edit', 'bash', 'scene_agent_start', 'agentdeck_run_project_script']) assert.ok(!names.includes(forbidden), forbidden);
-    assert.ok(f.presets.serviceFor(child, 'compaction'), 'native isolated compaction must be retained by the role preset');
+    assert.equal(f.presets.serviceFor(child, 'compaction'), undefined, 'new roles do not mount a separate recovery service');
+    assert.ok(f.ctx.get('compaction'), 'the host native recovery service remains available');
     const skill = success(await f.call('agentdeck_skill', { id: 'evidence-reading' }, { agent: child }));
     assert.equal(typeof skill, 'string');
     assert.ok(skill.length > 20);
@@ -132,7 +62,9 @@ test('actual Host entry, JSON domain and native preset start one guarded child w
     assert.equal(f.ctx.tools.get(privateName, child), undefined);
     const snapshots = [...f.domain().table('snapshots').entries()].map(([, snapshot]) => snapshot);
     assert.equal(snapshots.length, 1);
-    assert.equal(snapshots[0].model.maxTokens, 1536);
+    assert.equal(snapshots[0].policyVersion, 2);
+    assert.equal(Object.hasOwn(snapshots[0], 'budget'), false);
+    assert.equal(Object.hasOwn(snapshots[0].model, 'maxTokens'), false);
     assert.equal(snapshots[0].presetId, child.session.header.agentPreset);
     f.h.adapter.childGate.resolve();
     await f.h.waitForSettlement();
@@ -203,7 +135,11 @@ test('namespaced Host controls retain native ownership while ordinary Team tool 
     assert.ok(team);
     assert.notEqual(team.id, child.id);
     assert.equal(teamRequest.sessionId, team.id);
-    assert.equal(f.ctx.subagents.rootOf(team).id, f.h.parent.id, 'the sibling shares the actual native tree');
+    if (typeof f.ctx.subagents.rootOf === 'function') assert.equal(f.ctx.subagents.rootOf(team).id, f.h.parent.id, 'the sibling shares the actual native tree');
+    else {
+      const children = await f.ctx.subagents.listChildren(f.h.parent.id);
+      assert.ok(children.some(entry => entry.id === team.id), 'the legacy native catalog proves the same direct parent');
+    }
     // Native settlement may already release the stopped AgentDeck residency.
     // Compare the current registry cut rather than an earlier execution object.
     const stoppedResidency = f.ctx.agents.get(child.id);
@@ -318,7 +254,7 @@ test('legacy model configuration actions return owner migration guidance without
   } finally { await f.close(); }
 });
 
-test('JSON-backed snapshot survives Host reload and cold child continuation with the original role and maxTokens', async () => {
+test('resource-free snapshot survives Host reload and cold child continuation with original role and native output defaults', async () => {
   const f = await fixture({ holdChild: true });
   try {
     const run = success(await start(f));
@@ -337,7 +273,8 @@ test('JSON-backed snapshot survives Host reload and cold child continuation with
     await ownerSave(f, 'reader', 'schemaVersion: 1\nid: reader\ninstructions: New revision sentinel must affect only future tasks.\n');
     f.h.parent.options.maxTokens = 3072;
     await f.reloadHost();
-    assert.equal(f.domain().table('snapshots').get(run.revision).model.maxTokens, 1536);
+    assert.equal(f.domain().table('snapshots').get(run.revision).policyVersion, 2);
+    assert.equal(f.domain().table('snapshots').get(run.revision).model.maxTokens, undefined);
     assert.equal((await f.presets.resolve(presetId)).broken, undefined);
     f.h.adapter.childGate = deferred();
     f.h.adapter.childStarted = deferred();
@@ -349,9 +286,9 @@ test('JSON-backed snapshot survives Host reload and cold child continuation with
     await bounded(activation.dispose(), 'repeat disposal of the old exact fixture activation');
     assert.equal(f.ctx.agents.get(child.id), resumed, 'an old activation must not evict a later cold residency');
     assert.equal(resumed.session.header.agentPreset, presetId);
-    assert.equal(resumed.options.maxTokens, 1536);
+    assert.equal(resumed.options.maxTokens, undefined);
     const request = f.h.adapter.requests.filter(value => value.sessionId === child.id).at(-1);
-    assert.equal(request.maxTokens, 1536);
+    assert.equal(request.maxTokens, undefined);
     const prompt = request.messages.filter(message => message.role === 'system').flatMap(message => message.content).map(block => block.text ?? '').join('\n');
     assert.ok(prompt.includes(oldSnapshot.role.instructions));
     assert.doesNotMatch(prompt, /New revision sentinel/);
@@ -377,9 +314,10 @@ test('factory general uses a persisted constrained native-minimal fallback only 
     const snapshot = f.domain().table('snapshots').get(run.revision);
     assert.equal(snapshot.composition, 'native-minimal');
     assert.equal(snapshot.role.id, 'general');
-    assert.equal(snapshot.model.maxTokens, 1536);
+    assert.equal(snapshot.model.maxTokens, undefined);
     assert.equal(child.session.header.agentPreset, snapshot.presetId);
-    assert.ok(f.presets.serviceFor(child, 'compaction'));
+    assert.equal(f.presets.serviceFor(child, 'compaction'), undefined);
+    assert.ok(f.ctx.get('compaction'));
     assert.equal(f.ctx.tools.get('scene_agent_start', child), undefined);
     assert.equal(f.ctx.tools.get('bash', child), undefined);
     assert.ok(f.ctx.tools.get('agentdeck_skill', child));
@@ -398,7 +336,7 @@ test('factory general uses a persisted constrained native-minimal fallback only 
     assert.equal(resumed.session.header.agentPreset, snapshot.presetId);
     assert.equal(f.ctx.tools.get('scene_agent_start', resumed), undefined);
     assert.equal(f.ctx.tools.get('bash', resumed), undefined);
-    assert.equal(resumed.options.maxTokens, 1536);
+    assert.equal(resumed.options.maxTokens, undefined);
     f.h.adapter.childGate.resolve();
     await f.h.waitForSettlement();
   } finally { await f.close(); }
@@ -408,7 +346,7 @@ test('role native compaction replaces historical input with a smaller checkpoint
   const f = await fixture();
   try {
     await ownerSave(f, 'reader', 'schemaVersion: 1\nid: reader\ncontext:\n  targetTokens: 6000\n  elasticTokens: 10000\n');
-    const historical = 'Historical fixture evidence with a retrievable source. '.repeat(140);
+    const historical = 'Historical fixture evidence with a retrievable source. '.repeat(160);
     const run = success(await start(f, { prompt: `Read the first source.\n${historical}` }));
     await f.h.waitForSettlement();
     success(await f.call('scene_agent_control', { action: 'continue', childId: run.childId, message: `Read the second source.\n${historical}` }));
@@ -426,8 +364,8 @@ test('role native compaction replaces historical input with a smaller checkpoint
     const summaries = log.events.filter(event => event.type === 'compaction/summary' && event.seq > before.capturedThroughSeq);
     const afterTokens = meter.measure(f.h.events.findLast(({ session }) => session.id === run.childId).session).totalTokens;
     t.diagnostic(`Native request estimate before/after recovery: ${beforeTokens} -> ${afterTokens} tokens.`);
-    assert.ok(beforeTokens > run.budget.targetTokens, 'historical input must exceed the soft target before recovery');
-    assert.ok(afterTokens < run.budget.targetTokens, 'native recovery must return the continued request below the soft target');
+    assert.ok(beforeTokens > 8192, 'historical input must exceed the shared host pressure threshold before recovery');
+    assert.ok(afterTokens < 8192, 'native recovery must return the continued request below the shared host threshold');
     assert.ok(summaries.length > 0, 'native pressure recovery must commit a new summary on this continuation');
     const ends = log.events.filter(event => event.type === 'compaction/end' && event.seq > before.capturedThroughSeq);
     assert.ok(ends.length > 0);
@@ -593,7 +531,174 @@ test('preset-scoped native web consumers admit general and researcher fetches wh
   } finally { await f.close(); }
 });
 
-test('auto candidate dispatch pins one authorized choice, real output cap and old cold-resume policy', async () => {
+test('new roles accept input above the retired 48k ceiling within the actual native model window', async t => {
+  const f = await fixture({ holdChild: true });
+  try {
+    const resolveModel = f.h.adapter.resolveModel.bind(f.h.adapter);
+    f.h.adapter.resolveModel = async (...args) => ({ ...await resolveModel(...args), context: { contextWindow: 262144 } });
+    const run = success(await start(f, { prompt: 'Read source. '.repeat(7500) }));
+    f.h.adapter.childGate.resolve();
+    await f.h.waitForSettlement();
+    f.h.adapter.childGate = deferred();
+    f.h.adapter.childStarted = deferred();
+    success(await f.call('scene_agent_control', { action: 'continue', childId: run.childId, message: 'Next source. '.repeat(7500) }));
+    await bounded(f.h.adapter.childStarted.promise, 'second large native request');
+    const child = f.ctx.agents.get(run.childId);
+    const tokens = f.ctx.get('tokenMeter').measure(child.session).totalTokens;
+    assert.ok(tokens > 48000, String(tokens));
+    const snapshot = f.domain().table('snapshots').get(run.revision);
+    assert.equal(snapshot.policyVersion, 2);
+    assert.equal(snapshot.budget, undefined);
+    assert.equal(snapshot.model.maxTokens, undefined);
+    f.h.adapter.childGate.resolve();
+    await f.h.waitForSettlement();
+    const result = success(await f.call('scene_agent_result', { childId: run.childId }));
+    assert.equal(result.nativeStop.kind, 'completed');
+    assert.equal(result.rawText, CHILD_TEXT);
+    t.diagnostic('Accepted ' + tokens + ' native input tokens in a 262144-token local fixture window; no role ceiling was applied.');
+  } finally { await f.close(); }
+});
+
+test('native provider context overflow compacts and retries the same child without replaying tool effects', async t => {
+  const f = await fixture();
+  try {
+    const run = success(await start(f, { prompt: 'Retain this source as earlier authorized evidence. '.repeat(70) }));
+    await f.h.waitForSettlement();
+    const callsBefore = f.h.outcomes.length;
+    const stream = f.h.adapter.stream.bind(f.h.adapter);
+    let injected = false;
+    f.h.adapter.stream = async function* (options) {
+      if (options.sessionId === run.childId && options.purpose !== 'compaction' && !injected) {
+        injected = true;
+        f.h.adapter.requests.push(options);
+        throw new LlmError('Fixture provider rejected the current context window.', 'CONTEXT_WINDOW_EXCEEDED');
+      }
+      yield* stream(options);
+    };
+    success(await f.call('scene_agent_control', { action: 'continue', childId: run.childId, message: 'Use the retained evidence and finish this same task.' }));
+    await f.h.waitForSettlement();
+    assert.equal(injected, true);
+    assert.ok(f.h.adapter.requests.some(request => request.purpose === 'compaction'));
+    const log = await f.ctx.get('sessionQuery').readSession(run.childId);
+    assert.ok(log.events.some(event => event.type === 'compaction/summary'));
+    const result = success(await f.call('scene_agent_result', { childId: run.childId }));
+    assert.equal(result.nativeStop.kind, 'completed');
+    assert.equal(result.rawText, CHILD_TEXT);
+    assert.equal(new Set(f.h.starts.map(info => info.id)).size, 1);
+    const during = f.h.outcomes.slice(callsBefore);
+    assert.ok(during.every(({ exec }) => ['scene_agent_control', 'scene_agent_result'].includes(exec.name)));
+    t.diagnostic('Injected one standard provider overflow; native summary and retry completed in the original child Session.');
+  } finally { await f.close(); }
+});
+
+for (const coldResume of [false, true]) test(`Web parent-scoped recovery compacts child overflow after ${coldResume ? 'cold restore' : 'warm continuation'}`, async t => {
+  const f = await fixture({ parentCompaction: true });
+  try {
+    // Exercise unchanged native defaults with a capacity and history large enough
+    // for their 64k headroom and proportional retained tail, rather than role quotas.
+    const resolveModel = f.h.adapter.resolveModel.bind(f.h.adapter);
+    f.h.adapter.resolveModel = async (...args) => ({ ...await resolveModel(...args), context: { contextWindow: 262144 } });
+    assert.equal(f.ctx.get('compaction'), undefined, 'Web has no Host-wide recovery backend');
+    assert.ok(f.presets.serviceFor(f.h.parent, 'compaction'), 'only the parent preset initially owns recovery');
+    const history = 'Retain this source as earlier authorized evidence. '.repeat(1800);
+    const run = success(await start(f, { prompt: history }));
+    await f.h.waitForSettlement();
+    for (let turn = 0; turn < 2; turn++) {
+      success(await f.call('scene_agent_control', { action: 'continue', childId: run.childId, message: history }));
+      await f.h.waitForSettlement();
+    }
+    if (coldResume) {
+      await bounded(f.h.activationFor(run.childId).dispose(), 'evict child before recovery proof');
+      await f.reloadHost();
+    }
+    const callsBefore = f.h.outcomes.length;
+    const requestsBefore = f.h.adapter.requests.length;
+    const stream = f.h.adapter.stream.bind(f.h.adapter);
+    let injected = false;
+    f.h.adapter.stream = async function* (options) {
+      if (options.sessionId === run.childId && options.purpose !== 'compaction' && !injected) {
+        injected = true;
+        f.h.adapter.requests.push(options);
+        throw new LlmError('Fixture provider rejected the current context window.', 'CONTEXT_WINDOW_EXCEEDED');
+      }
+      yield* stream(options);
+    };
+    success(await f.call('scene_agent_control', { action: 'continue', childId: run.childId, message: 'Use the retained evidence and finish this same task.' }));
+    await f.h.waitForSettlement();
+    assert.equal(injected, true);
+    const recovery = f.h.adapter.requests.slice(requestsBefore).filter(request => request.purpose === 'compaction');
+    assert.ok(recovery.length > 0, 'provider overflow must invoke native compaction');
+    assert.ok(recovery.every(request => request.sessionId === run.childId), 'the sibling parent backend must not recover this child');
+    const log = await f.ctx.get('sessionQuery').readSession(run.childId);
+    assert.ok(log.events.some(event => event.type === 'compaction/summary'));
+    const result = success(await f.call('scene_agent_result', { childId: run.childId }));
+    assert.equal(result.nativeStop.kind, 'completed');
+    assert.equal(result.rawText, CHILD_TEXT);
+    assert.equal(new Set(f.h.starts.map(info => info.id)).size, 1);
+    assert.ok(f.h.outcomes.slice(callsBefore).every(({ exec }) => ['scene_agent_control', 'scene_agent_result'].includes(exec.name)), 'recovery must not replay tool effects');
+    const snapshot = f.domain().table('snapshots').get(run.revision);
+    assert.equal(snapshot.policyVersion, 2);
+    assert.equal(snapshot.budget, undefined);
+    assert.equal(snapshot.model.maxTokens, undefined);
+    t.diagnostic('Parent-only Web scope recovered overflow in the original child with native defaults; no role quota or real model call.');
+  } finally { await f.close(); }
+});
+
+test('native output cutoff remains partial with retained text and can continue in the same child', async () => {
+  const f = await fixture();
+  try {
+    const stream = f.h.adapter.stream.bind(f.h.adapter);
+    let truncate = true;
+    f.h.adapter.stream = async function* (options) {
+      for await (const chunk of stream(options)) yield chunk.type === 'finish' && truncate && options.purpose !== 'compaction'
+        ? { type: 'finish', reason: { kind: 'max-tokens' } } : chunk;
+    };
+    const run = success(await start(f));
+    await f.h.waitForSettlement();
+    const partial = success(await f.call('scene_agent_result', { childId: run.childId }));
+    assert.equal(partial.status, 'partial');
+    assert.equal(partial.nativeStop.kind, 'max-tokens');
+    assert.equal(partial.rawText, CHILD_TEXT);
+    truncate = false;
+    success(await f.call('scene_agent_control', { action: 'continue', childId: run.childId, message: 'Continue the incomplete answer from its retained text.' }));
+    await f.h.waitForSettlement();
+    const result = success(await f.call('scene_agent_result', { childId: run.childId }));
+    assert.equal(result.nativeStop.kind, 'completed');
+    assert.equal(new Set(f.h.starts.map(info => info.id)).size, 1);
+  } finally { await f.close(); }
+});
+
+test('persisted policy-one task restores its historical cap and isolated recovery without migrating its snapshot', async () => {
+  const f = await fixture({ holdChild: true });
+  try {
+    const run = success(await start(f));
+    const child = f.ctx.agents.get(run.childId);
+    f.h.adapter.childGate.resolve();
+    await f.h.waitForSettlement();
+    const original = f.domain().table('snapshots').get(run.revision);
+    const historical = { ...original, policyVersion: 1,
+      model: { ...original.model, maxTokens: 2048 },
+      budget: { known: true, targetTokens: 6000, elasticTokens: 10000, safeInputTokens: 13312, headroomTokens: 1024, diagnostics: [] },
+      role: { ...original.role, schemaVersion: 2, output: { maxTokens: 2048 }, context: { targetTokens: 6000, elasticTokens: 10000 } } };
+    await f.domain().table('snapshots').put(run.revision, historical);
+    await bounded(f.h.activationFor(child.id).dispose(), 'evict legacy compatibility fixture residency');
+    await f.reloadHost();
+    f.h.adapter.childGate = deferred();
+    f.h.adapter.childStarted = deferred();
+    success(await f.call('scene_agent_control', { action: 'continue', childId: child.id, message: 'Continue the historical task with its original policy.' }));
+    await bounded(f.h.adapter.childStarted.promise, 'historical child restored');
+    const resumed = f.ctx.agents.get(child.id);
+    assert.equal(resumed.options.maxTokens, 2048);
+    assert.ok(f.presets.serviceFor(resumed, 'compaction'));
+    assert.equal(f.h.adapter.requests.filter(request => request.sessionId === child.id).at(-1).maxTokens, 2048);
+    assert.deepEqual(f.domain().table('snapshots').get(run.revision), historical);
+    f.h.adapter.childGate.resolve();
+    await f.h.waitForSettlement();
+    assert.equal(success(await f.call('scene_agent_result', { childId: child.id })).nativeStop.kind, 'completed');
+  } finally { await f.close(); }
+});
+
+test('legacy auto candidates pin authorized route and effort without carrying retired caps into new tasks or cold resume', async () => {
   const f = await fixture({ holdChild: true });
   const definition = cap => `schemaVersion: 2\nid: auto-reader\nextends: reader\nmodel:\n  mode: auto\n  defaultCandidate: quick\n  candidates:\n    - id: quick\n      purpose: Small verified read\n      provider: ${ROUTE.provider}\n      model: ${ROUTE.model}\n      reasoning: { mode: fixed, effort: low }\n      maxTokens: ${cap}\n    - id: blocked\n      purpose: POOL_ONLY_SENTINEL\n      provider: ${ROUTE.provider}\n      model: forbidden\n      reasoning: { mode: fixed, effort: high }\n      maxTokens: 3072\nreasoning: { mode: model-default }\n`;
   try {
@@ -630,9 +735,9 @@ test('auto candidate dispatch pins one authorized choice, real output cap and ol
     assert.equal(receipt.decision.reason, args.candidateReason);
     assert.equal(receipt.decision.candidateId, 'quick');
     const child = f.ctx.agents.get(run.childId);
-    assert.equal(child.options.maxTokens, 2048);
+    assert.equal(child.options.maxTokens, 1536);
     const first = f.h.adapter.requests.find(value => value.sessionId === child.id);
-    assert.equal(first.maxTokens, 2048);
+    assert.equal(first.maxTokens, 1536);
     assert.equal(first.reasoningEffort, 'low');
     assert.equal(first.model, ROUTE.model);
     assert.doesNotMatch(JSON.stringify(first.messages), /POOL_ONLY_SENTINEL/);
@@ -652,8 +757,8 @@ test('auto candidate dispatch pins one authorized choice, real output cap and ol
     await bounded(f.h.adapter.childStarted.promise, 'cold selected candidate request');
     const resumed = f.ctx.agents.get(child.id);
     const cold = f.h.adapter.requests.filter(value => value.sessionId === child.id).at(-1);
-    assert.equal(resumed.options.maxTokens, 2048);
-    assert.equal(cold.maxTokens, 2048);
+    assert.equal(resumed.options.maxTokens, undefined);
+    assert.equal(cold.maxTokens, undefined);
     assert.equal(cold.reasoningEffort, 'low');
     assert.equal(f.domain().table('snapshots').get(run.revision).sourceRevision, pool.revision);
     f.h.adapter.childGate.resolve();

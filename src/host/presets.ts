@@ -1,15 +1,18 @@
 import { fileURLToPath } from 'node:url';
+import type {} from '@deepseek-ai/dsh-agent-preset-registry';
 import type { HostContext, RoleSnapshot } from './types.js';
 
 export class SnapshotPresets {
   private readonly registered = new Map<string, Promise<() => Promise<void>>>();
   constructor(private readonly ctx: HostContext) {}
   async register(snapshot: RoleSnapshot): Promise<void> {
-    if (snapshot.policyVersion !== 1) throw new Error(`Unsupported AgentDeck snapshot policy ${snapshot.policyVersion}`);
+    if (snapshot.policyVersion !== 1 && snapshot.policyVersion !== 2) throw new Error(`Unsupported AgentDeck snapshot policy ${snapshot.policyVersion}`);
     let registration = this.registered.get(snapshot.presetId);
     if (!registration) {
-      const ratio = snapshot.model.contextWindow ? Math.min(0.8, snapshot.budget.targetTokens / snapshot.model.contextWindow) : 0.8;
-      const retained = Math.max(128, Math.min(4096, Math.floor(snapshot.budget.elasticTokens / 4)));
+      const legacy = snapshot.policyVersion === 1;
+      if (legacy && !snapshot.budget) throw new Error('Historical snapshot is missing its context policy.');
+      const ratio = legacy && snapshot.model.contextWindow ? Math.min(0.8, snapshot.budget!.targetTokens / snapshot.model.contextWindow) : 0.8;
+      const retained = legacy ? Math.max(128, Math.min(4096, Math.floor(snapshot.budget!.elasticTokens / 4))) : undefined;
       const canWrite = snapshot.role.capabilities.some(capability => capability === 'source-edit' || capability === 'artifact-write');
       const definition = {
         id: snapshot.presetId,
@@ -24,14 +27,15 @@ export class SnapshotPresets {
           ...(snapshot.webTools ? [{ id: 'agentdeck-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: true, search: true, fetchMaxOutputChars: 40_000, searchMaxResults: 6 } }] : []),
           ...(snapshot.role.capabilities.some(value => value.startsWith('browser-')) ? [{ id: 'agentdeck-browser-skill-loader', name: '@deepseek-ai/dsh-tool-skill' }] : []),
           { id: 'agentdeck-native-executor', name: '@deepseek-ai/dsh-tool-executor-native' },
-          { id: 'agentdeck-compaction', name: 'cordis:group', group: true, isolate: { compaction: true }, config: [
-            { id: 'agentdeck-compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: {
+          // A parent's isolated preset is a sibling, so only Host-wide recovery can be reused.
+          ...(legacy || !this.ctx.get('compaction') ? [{ id: 'agentdeck-compaction', name: 'cordis:group', group: true, isolate: { compaction: true as const }, config: [
+            { id: 'agentdeck-compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: legacy ? {
               thresholdRatio: Math.max(0.01, ratio), retainTokens: retained,
-              headroomTokens: snapshot.budget.headroomTokens,
+              headroomTokens: snapshot.budget!.headroomTokens,
               maxTokens: Math.max(1, Math.min(8192, snapshot.model.maxTokens ?? 8192)),
               maxOverflowRetries: 1, compactionRetries: 1,
-            } },
-          ] },
+            } : {} },
+          ] }] : []),
           { id: 'agentdeck-role-policy', name: fileURLToPath(new URL('../role.js', import.meta.url)), config: { snapshot } },
         ],
       };

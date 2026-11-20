@@ -43,10 +43,10 @@ test('factory catalog has all 13 roles and 3 variants, complete English resource
   assert.deepEqual(loadBuiltinAgents()[0].skills, ['task-handoff']);
 });
 
-test('strict complete validation rejects unknown shapes, invalid model pairs and inconsistent budgets', () => {
+test('strict complete validation rejects unknown shapes, invalid model pairs and retired resources', () => {
   const base = loadBuiltinAgents()[0];
   const invalid = [
-    { surprise: true }, { schemaVersion: 3 }, { id: 'General' }, { id: '../general' }, { enabled: 'true' },
+    { surprise: true }, { schemaVersion: 4 }, { id: 'General' }, { id: '../general' }, { enabled: 'true' },
     { title: { en: 'Title' } }, { description: { ...base.description, extra: 'no' } },
     { capabilities: ['files-read', 'files-read'] }, { capabilities: ['all-tools'] },
     { model: { mode: 'fixed', provider: 'provider' } }, { model: { mode: 'fixed', model: 'model' } },
@@ -70,7 +70,7 @@ test('YAML parser accepts exact schema and rejects unsafe, ambiguous or unknown 
   assert.deepEqual(parseOverrideText('schemaVersion: 1\nid: reader\ninstructions:\n  append: Read carefully.\n'),
     { schemaVersion: 1, id: 'reader', instructions: { append: 'Read carefully.' } });
   const bad = [
-    '', '[]', 'id: reader', 'schemaVersion: 3\nid: reader', 'schemaVersion: 1\nid: reader\nextra: true',
+    '', '[]', 'id: reader', 'schemaVersion: 4\nid: reader', 'schemaVersion: 1\nid: reader\nextra: true',
     'schemaVersion: 1\nid: reader\nid: general', 'schemaVersion: 1\nid: reader\n---\nid: general',
     'schemaVersion: 1\nid: reader\ninstructions: !execute command',
     'schemaVersion: 1\nid: reader\ninstructions: !!js/function function() {}',
@@ -82,7 +82,7 @@ test('YAML parser accepts exact schema and rejects unsafe, ambiguous or unknown 
     'schemaVersion: 1\nid: reader\ninstructions: {}',
     'schemaVersion: 1\nid: reader\nskills: {extra: [x]}',
     'schemaVersion: 1\nid: reader\ncapabilities: {remove: [unknown]}',
-    'schemaVersion: 1\nid: reader\ncontext: {targetTokens: -1}',
+    'schemaVersion: 3\nid: reader\ncontext: {targetTokens: -1}',
   ];
   for (const text of bad) assert.throws(() => parseOverrideText(text), undefined, text);
   assert.throws(() => parseOverrideText('x'.repeat(1_048_577)), /1 MiB/);
@@ -105,8 +105,7 @@ test('ordered overrides merge localized and nested fields, instruction operation
   const reader = find(result, 'reader');
   assert.equal(reader.title.en, 'Profile reader');
   assert.equal(reader.title.zh, original.title.zh);
-  assert.equal(reader.context.targetTokens, 18000);
-  assert.equal(reader.context.elasticTokens, original.context.elasticTokens);
+  assert.equal(Object.hasOwn(reader, 'context'), false);
   assert.equal(reader.instructions, 'Replacement instructions.\n\nProject note.');
   assert.deepEqual(reader.skills, ['evidence-reading', 'custom-skill']);
   assert.deepEqual(reader.scripts, []);
@@ -129,8 +128,8 @@ test('new complete roles and forward inheritance resolve deterministically witho
   assert.equal(find(first, 'derived-reader').title.en, 'Future reader');
   assert.deepEqual(find(first, 'independent'), complete);
   assert.deepEqual(first, resolveCatalog(inputs));
-  find(first, 'reader').context.targetTokens = 1;
-  assert.equal(loadBuiltinAgents().find(agent => agent.id === 'reader').context.targetTokens, 16000);
+  find(first, 'reader').skills.push('fixture-only');
+  assert.equal(loadBuiltinAgents().find(agent => agent.id === 'reader').skills.includes('fixture-only'), false);
 });
 
 test('bad overrides remove their role and dependent derivations while unrelated roles remain usable', () => {
@@ -138,7 +137,7 @@ test('bad overrides remove their role and dependent derivations while unrelated 
     override('bad-reader.yml', { id: 'reader', unknown: true }),
     override('dependent.yml', { id: 'child-reader', extends: 'reader' }),
     override('missing.yml', { id: 'missing-child', extends: 'nonexistent' }),
-    override('bad-budget.yml', { id: 'architect', context: { targetTokens: 100, elasticTokens: 10 } }),
+    override('bad-budget.yml', { schemaVersion: 3, id: 'architect', context: { targetTokens: 100, elasticTokens: 10 } }),
     override('good.yml', { id: 'researcher', displayName: 'Still usable' }),
   ]);
   for (const id of ['reader', 'long-document-reader', 'child-reader', 'missing-child', 'architect']) assert.equal(find(result, id), undefined, id);
@@ -198,7 +197,6 @@ test('canonical revisions ignore object key order, include complete content and 
   const agent = loadBuiltinAgents()[0];
   const reordered = Object.fromEntries(Object.entries(agent).reverse());
   reordered.title = { zh: agent.title.zh, en: agent.title.en };
-  reordered.context = { elasticTokens: agent.context.elasticTokens, targetTokens: agent.context.targetTokens };
   const revision = agentRevision(agent);
   assert.match(revision, /^[a-f0-9]{64}$/);
   assert.equal(agentRevision(reordered), revision);

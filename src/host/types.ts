@@ -3,8 +3,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { AgentDefinition, SkillDefinition } from '../core/index.js';
 
 /** Public Cordis dependency APIs are discovered at runtime; narrow at each owner. */
-export type HostContext = Context & Record<string, any>;
-export type RuntimeAgent = Agent & Record<string, any>;
+export type HostContext = Context;
+export type RuntimeAgent = Agent;
 export type JsonObject = Record<string, any>;
 
 export interface EffectiveSelection { provider: string; model: string; reasoningEffort?: string; maxTokens?: number }
@@ -17,10 +17,11 @@ export interface RoleSnapshot {
   skills: (SkillDefinition & { resourceBase?: unknown })[];
   composition?: 'native-minimal';
   webTools?: boolean;
-  budget: { known: boolean; targetTokens: number; elasticTokens: number; safeInputTokens?: number; headroomTokens: number; diagnostics: string[] };
+  /** Historical policy1 only; new policy2 snapshots inherit native recovery. */
+  budget?: { known: boolean; targetTokens: number; elasticTokens: number; safeInputTokens?: number; headroomTokens: number; diagnostics: string[] };
   model: { provider: string; model: string; reasoningEffort?: string; maxTokens?: number; contextWindow?: number };
   createdAt: number;
-  policyVersion: 1;
+  policyVersion: 1 | 2;
   scriptRevisions?: Record<string, string>;
   sourceRevision?: string;
   candidateId?: string;

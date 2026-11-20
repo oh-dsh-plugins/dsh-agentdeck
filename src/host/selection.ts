@@ -7,7 +7,7 @@ import type { EffectiveSelection, JsonObject, RoutingDecision } from './types.js
 export function roleChoice(role: AgentDefinition, parent: JsonObject | undefined, request: JsonObject = {}, requireRevision = false): {
   configured: EffectiveSelection | undefined;
   explicit: boolean;
-  outputSource: 'candidate' | 'role' | 'parent' | 'native-default' | 'unknown';
+  outputSource: 'parent' | 'native-default';
   decision?: RoutingDecision;
 } {
   const revision = agentRevision(role);
@@ -16,7 +16,7 @@ export function roleChoice(role: AgentDefinition, parent: JsonObject | undefined
   const provider = optionalString(request.provider, 'provider');
   const model = optionalString(request.model, 'model');
   if ((provider === undefined) !== (model === undefined)) throw new Error('provider and model must be supplied together.');
-  if (request.maxTokens !== undefined) throw new Error('Output policy is owner-configured; a dispatch cannot override maxTokens.');
+  if (request.maxTokens !== undefined) throw new Error('AgentDeck does not set an independent output limit; use native model settings.');
   const requestedEffort = optionalString(request.reasoning_effort, 'reasoning_effort');
   const candidateId = optionalString(request.candidateId, 'candidateId');
   if (role.model.mode === 'auto') {
@@ -37,18 +37,17 @@ export function roleChoice(role: AgentDefinition, parent: JsonObject | undefined
     const effort = candidate.reasoning.mode === 'fixed' ? candidate.reasoning.effort : undefined;
     if (requestedEffort !== undefined && requestedEffort !== effort) throw new Error('Explicit effort conflicts with the selected candidate; update its policy through the owner UI.');
     const reason = request.candidateReason === undefined ? undefined : requiredString(request.candidateReason, 'candidateReason', 240);
-    return { configured: { provider: candidate.provider, model: candidate.model, ...(effort ? { reasoningEffort: effort } : {}), maxTokens: candidate.maxTokens }, explicit: true, outputSource: 'candidate',
+    return { configured: { provider: candidate.provider, model: candidate.model, ...(effort ? { reasoningEffort: effort } : {}) }, explicit: true, outputSource: 'native-default',
       decision: { candidateId: candidate.id, roleRevision: revision, source, ...(reason ? { reason } : {}) } };
   }
   if (candidateId !== undefined || request.candidateReason !== undefined) throw new Error('Candidates are supported only by an auto role.');
   const route = provider && model ? { provider, model } : role.model.mode === 'fixed'
     ? { provider: role.model.provider!, model: role.model.model! } : parent ? { provider: parent.provider, model: parent.model } : undefined;
-  const maximum = role.output?.maxTokens ?? parent?.maxTokens;
-  const outputSource = role.output?.maxTokens !== undefined ? 'role' : parent?.maxTokens !== undefined ? 'parent' : 'unknown';
+  const outputSource = parent?.maxTokens !== undefined ? 'parent' as const : 'native-default' as const;
   if (!route) return { configured: undefined, explicit: false, outputSource };
   const changed = !parent || route.provider !== parent.provider || route.model !== parent.model;
   const effort = requestedEffort ?? (role.reasoning.mode === 'fixed' ? role.reasoning.effort
     : role.reasoning.mode === 'inherit-compatible' && !changed ? parent?.reasoningEffort : undefined);
-  return { configured: { ...route, ...(effort ? { reasoningEffort: effort } : {}), ...(maximum === undefined ? {} : { maxTokens: maximum }) },
+  return { configured: { ...route, ...(effort ? { reasoningEffort: effort } : {}) },
     explicit: provider !== undefined || role.model.mode === 'fixed' || requestedEffort !== undefined || role.reasoning.mode !== 'inherit-compatible', outputSource };
 }

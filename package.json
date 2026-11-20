@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentdeck",
-  "version": "0.2.12",
+  "version": "0.3.0",
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
   "description": "Ready-to-use scene agents for DeepSeek Harness with native delegation, explicit model settings and extensible skills.",
   "keywords": ["deepseek-harness", "deepseek-harness-plugin", "dsh", "dsh-plugin", "agents", "subagents", "agent-skills", "model-selection", "typescript"],
@@ -9,7 +9,7 @@
   "bugs": { "url": "https://github.com/oh-dsh-plugins/dsh-agentdeck/issues" },
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=24.9.0", "dsh": "0.2.2-rc.3" },
+  "engines": { "node": ">=24.9.0", "dsh": ">=0.2.2-rc.1" },
   "exports": {
     ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" },
     "./role": { "types": "./lib/role.d.ts", "default": "./lib/role.js" },
@@ -24,24 +24,25 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
     "check:pack": "node scripts/check-pack.mjs",
-    "dev:link-host": "node scripts/link-host.mjs"
+    "dev:link-host": "node scripts/link-host.mjs",
+    "test:compatibility": "node scripts/verify-compatibility.mjs"
   },
   "dependencies": { "yaml": "^2.8.1", "zod": "^4.1.0" },
   "devDependencies": { "@types/node": "^24.0.0", "typescript": "^5.9.3" },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.1.0",
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@deepseek-ai/dsh-subagent": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-client-connection": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-scope": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-tool-subagent": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-session": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-agent-preset-registry": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.3",
-    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.3"
+    "@deepseek-ai/dsh-subagent": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-connection": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-scope": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-subagent": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-session": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-preset-registry": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-storage-domain": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": { "optional": true },

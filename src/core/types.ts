@@ -6,11 +6,10 @@ export interface ModelCandidate {
   provider: string;
   model: string;
   reasoning: { mode: 'model-default' | 'fixed'; effort?: string };
-  maxTokens: number;
 }
 
 export interface AgentDefinition {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   id: string;
   title: LocalizedText;
   description: LocalizedText;
@@ -22,8 +21,6 @@ export interface AgentDefinition {
   deliverables: string[];
   model: { mode: 'inherit' | 'fixed' | 'auto'; provider?: string; model?: string; candidates?: ModelCandidate[]; defaultCandidate?: string };
   reasoning: { mode: 'inherit-compatible' | 'model-default' | 'fixed'; effort?: string };
-  output?: { maxTokens: number };
-  context: { targetTokens: number; elasticTokens: number };
   enabled: boolean;
   extends?: string;
 }

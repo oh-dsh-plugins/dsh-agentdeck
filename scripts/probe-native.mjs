@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Isolated native DSH 0.2.2-rc.3 proof. All runtime imports use public exports.
+ * Isolated native DSH >=0.2.2-rc.1 proof. All runtime imports use public exports.
  * The only substitute is a deterministic, local LLM adapter: there is no HTTP,
  * credential access, profile mutation, or paid model call. Native AgentLoop,
  * spawn, policy projections, tool pipeline, inbox and JSONL persistence run.
@@ -127,10 +127,10 @@ export class LocalProofAdapter extends LlmAdapter {
 }
 
 /** Real native services; task-owned temporary JSONL data is removed on close. */
-export async function createNativeHarness({ policy, toolOptions = {}, holdChild = false } = {}) {
-  assert.equal(nativeToolsPackage.version, '0.2.2-rc.3', 'this proof pins the installed DSH compatibility baseline');
+export async function createNativeHarness({ policy, toolOptions = {}, holdChild = false, directory, resumeSessionId } = {}) {
+  if (process.env.AGENTDECK_EXPECT_DSH_VERSION) assert.equal(nativeToolsPackage.version, process.env.AGENTDECK_EXPECT_DSH_VERSION, 'The fixture must resolve the selected isolated host');
   const tempParent = await realpath(tmpdir());
-  const storageRoot = await mkdtemp(join(tempParent, 'agentdeck-native-proof-'));
+  const storageRoot = directory ? await realpath(directory) : await mkdtemp(join(tempParent, 'agentdeck-native-proof-'));
   const root = new Context();
   const adapter = new LocalProofAdapter();
   if (holdChild) adapter.childGate = deferred();
@@ -162,10 +162,12 @@ export async function createNativeHarness({ policy, toolOptions = {}, holdChild 
         await root.fiber.dispose();
       } finally {
         // Verify the exact resolved task-owned target before recursive cleanup.
-        const target = await realpath(storageRoot);
-        assert.equal(dirname(target), tempParent);
-        assert.ok(basename(target).startsWith('agentdeck-native-proof-'));
-        await rm(target, { recursive: true });
+        if (!directory) {
+          const target = await realpath(storageRoot);
+          assert.equal(dirname(target), tempParent);
+          assert.ok(basename(target).startsWith('agentdeck-native-proof-'));
+          await rm(target, { recursive: true });
+        }
       }
     }
   }
@@ -221,7 +223,7 @@ export async function createNativeHarness({ policy, toolOptions = {}, holdChild 
       provider: 'spawn', toolName: PRIVATE_TOOL, modelSelection: true,
       modelDiscovery: true, maxDepth: 1, ...toolOptions,
     });
-    parentHandle = await ctx.agents.create({
+    parentHandle = resumeSessionId ? await ctx.agents.resume({ resumeSessionId, agentOptions: { ...ROUTE, reasoningEffort: 'low' } }) : await ctx.agents.create({
       sessionId: 'native-proof-parent',
       meta: { cwd: storageRoot },
       agentOptions: { ...ROUTE, reasoningEffort: 'low' },
@@ -252,15 +254,23 @@ export async function createNativeHarness({ policy, toolOptions = {}, holdChild 
       const result = batch.results[0].result;
       if (result.isError) return result;
       assert.equal(result.value.kind, 'activation');
-      assert.equal(typeof result.value.name, 'string', 'rc.3 native receipt identifies a child by name');
-      // The probe's stable helper shape adds a derived Session id. The actual
-      // native receipt remains name-only in outcomes; public resolution provides
-      // the real identity rather than assuming a removed native output field.
-      const subagentId = await ctx.subagents.resolveName(agent ?? parent, result.value.name, signal ?? new AbortController().signal);
+      // Keep raw outcomes untouched. This independent fixture recognizes the two
+      // published receipts without calling the production compatibility adapter.
+      let subagentId;
+      if (typeof result.value.name === 'string') {
+        assert.equal(result.value.subagentId, undefined);
+        assert.equal(typeof ctx.subagents.resolveName, 'function');
+        subagentId = await ctx.subagents.resolveName(agent ?? parent, result.value.name, signal ?? new AbortController().signal);
+      } else {
+        assert.equal(typeof result.value.subagentId, 'string');
+        assert.equal(result.value.name, undefined);
+        subagentId = result.value.subagentId;
+      }
       return { ...result, value: { ...result.value, subagentId } };
     };
     const waitForSettlement = async () => {
-      await bounded(ctx.subagents.waitForTreeWork(parent), 'native subagent tree settlement');
+      const wait = typeof ctx.subagents.waitForTreeWork === 'function' ? ctx.subagents.waitForTreeWork(parent) : ctx.subagents.waitForChildren(parent);
+      await bounded(wait, 'native subagent tree settlement');
       await bounded(parent.whenIdle(), 'parent completion notice turn');
     };
     const activationFor = (childId) => {

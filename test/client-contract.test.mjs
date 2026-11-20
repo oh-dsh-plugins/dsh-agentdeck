@@ -20,11 +20,11 @@ const plugin = registration.factory(name => {
 const clone = value => JSON.parse(JSON.stringify(value));
 const ok = value => ({ ok: true, value });
 const general = {
-  schemaVersion: 1, id: 'general', title: { en: 'General', zh: '通用' },
+  schemaVersion: 3, id: 'general', title: { en: 'General', zh: '通用' },
   description: { en: 'General tasks', zh: '通用任务' }, instructions: 'Preserve task authorization.',
   capabilities: ['files-read'], skills: [], scripts: [], inputs: ['Task'], deliverables: ['Report'],
   model: { mode: 'inherit' }, reasoning: { mode: 'inherit-compatible' },
-  context: { targetTokens: 24000, elasticTokens: 48000 }, enabled: true,
+  enabled: true,
   revision: 'factory-r1', builtin: true, available: true, missingCapabilities: [],
 };
 const catalog = (overrides = [], agents = [general]) => ({
@@ -213,7 +213,7 @@ test('create and derive send a real YAML override through agentdeck.save', async
   assert.equal((await controller.save('@new')).ok, true);
   const call = calls.find(call => call.endpoint === 'agentdeck.save');
   assert.equal(call.payload.id, 'project-reader');
-  assert.deepEqual(JSON.parse(call.payload.text), { schemaVersion: 1, id: 'project-reader', extends: 'general' });
+  assert.deepEqual(JSON.parse(call.payload.text), { schemaVersion: 3, id: 'project-reader', extends: 'general' });
   assert.equal('expectedRevision' in call.payload, false);
   controller.dispose();
 });
@@ -315,7 +315,7 @@ test('deriving a project role includes the selected Session in the new-role save
   assert.equal(save.payload.id, 'project-derived');
   assert.equal(save.payload.sessionId, 'session-a');
   assert.equal('expectedRevision' in save.payload, false);
-  assert.deepEqual(JSON.parse(save.payload.text), { schemaVersion: 1, id: 'project-derived', extends: 'project-base' });
+  assert.deepEqual(JSON.parse(save.payload.text), { schemaVersion: 3, id: 'project-derived', extends: 'project-base' });
   controller.dispose();
 });
 
@@ -357,7 +357,7 @@ test('provider discovery does not implicitly resolve an inherited model', async 
 });
 
 test('preview retains native effective selection and unknown budget values verbatim', async () => {
-  const preview = { agent: general, effectiveSelection: { provider: 'actual', model: 'real-model', reasoningEffort: 'high', maxTokens: 8192 }, budget: { known: false, targetTokens: 24000, elasticTokens: 12000, headroomTokens: 0, diagnostics: ['Window unknown'] }, diagnostics: [] };
+  const preview = { agent: general, effectiveSelection: { provider: 'actual', model: 'real-model', reasoningEffort: 'high' }, budget: { known: false, targetTokens: 24000, elasticTokens: 12000, headroomTokens: 0, diagnostics: ['Window unknown'] }, diagnostics: [] };
   const { controller, calls } = harness(() => ok(preview));
   await controller.loadPreview('general');
   assert.deepEqual(clone(controller.getSnapshot().preview.effectiveSelection), preview.effectiveSelection);
@@ -567,130 +567,8 @@ test('mutations have no read deadline or automatic replay', async () => {
   f.controller.dispose();
 });
 
-const candidate = (id, extra = {}) => ({ id, purpose: 'Use for ' + id, provider: 'provider-' + id, model: 'model-' + id, reasoning: { mode: 'model-default' }, maxTokens: 4096, ...extra });
-const autoRole = () => ({ ...clone(general), schemaVersion: 2, model: { mode: 'auto', defaultCandidate: 'fast', candidates: [candidate('fast'), candidate('deep', { reasoning: { mode: 'fixed', effort: 'high' }, maxTokens: 8192 })] }, reasoning: { mode: 'model-default' } });
-
-test('existing v1 definitions stay v1 until a new feature is authored', async () => {
-  const { controller } = harness();
-  try {
-    await controller.loadCatalog();
-    assert.equal(JSON.parse(controller.getSnapshot().drafts.general.text).schemaVersion, 1);
-    controller.updateForm('general', { enabled: false });
-    controller.setModelMode('general', 'fixed');
-    controller.updateForm('general', { model: { mode: 'fixed', provider: 'p', model: 'm' }, reasoning: { mode: 'fixed', effort: 'high' } });
-    assert.equal(JSON.parse(controller.getSnapshot().drafts.general.text).schemaVersion, 1);
-    controller.updateForm('general', { output: { maxTokens: 6000 } });
-    let definition = parse(await controller.materializeDraft('general'));
-    assert.equal(definition.schemaVersion, 2);
-    assert.deepEqual(definition.output, { maxTokens: 6000 });
-    controller.updateForm('general', { output: undefined });
-    definition = parse(await controller.materializeDraft('general'));
-    assert.equal(definition.schemaVersion, 2);
-    assert.equal(definition.output, null, 'an override must explicitly clear an inherited output cap');
-    controller.discard('general');
-    assert.equal(JSON.parse(controller.getSnapshot().drafts.general.text).schemaVersion, 1);
-    controller.setModelMode('general', 'auto');
-    assert.equal(controller.getSnapshot().drafts.general.form.schemaVersion, 2);
-  } finally { controller.dispose(); }
-});
-
-test('output caps roundtrip through save and catalog without changing other definition fields', async () => {
-  let current = clone(general);
-  let override;
-  const { controller, calls } = harness(call => {
-    if (call.endpoint === 'agentdeck.save') {
-      current = { ...current, ...parse(call.payload.text), revision: 'override-r2', builtin: true, available: true, missingCapabilities: [] };
-      override = { id: current.id, text: call.payload.text, revision: current.revision };
-      return ok(override);
-    }
-    return ok(catalog(override ? [override] : [], [current]));
-  });
-  try {
-    await controller.loadCatalog();
-    controller.updateForm('general', { output: { maxTokens: 7000 } });
-    controller.updateForm('general', { context: { ...general.context, targetTokens: 25000 } });
-    const authored = parse(await controller.materializeDraft('general'));
-    assert.deepEqual(authored.output, { maxTokens: 7000 });
-    assert.equal('instructions' in authored, false);
-    assert.deepEqual(authored.context, { targetTokens: 25000 });
-    assert.equal((await controller.save('general')).ok, true);
-    const draft = controller.getSnapshot().drafts.general;
-    assert.equal(draft.text, draft.baseline);
-    assert.equal(draft.expectedRevision, 'override-r2');
-    assert.equal(draft.form.output.maxTokens, 7000);
-    assert.equal(current.instructions, general.instructions);
-    assert.equal(calls.filter(call => call.endpoint === 'agentdeck.save').length, 1);
-  } finally { controller.dispose(); }
-});
-
-test('inline auto editor owns candidate cap and effort, preserves defaults, and bounds candidates', async () => {
-  let current = { ...clone(general), model: { mode: 'fixed', provider: 'p', model: 'm' }, reasoning: { mode: 'fixed', effort: 'high' } };
-  let override;
-  const { controller } = harness(call => {
-    if (call.endpoint === 'agentdeck.save') {
-      current = { ...current, ...parse(call.payload.text), revision: 'auto-r2', builtin: true, available: true, missingCapabilities: [] };
-      override = { id: current.id, text: call.payload.text, revision: current.revision };
-      return ok(override);
-    }
-    return ok(catalog(override ? [override] : [], [current]));
-  });
-  try {
-    await controller.loadCatalog();
-    controller.updateForm('general', { output: { maxTokens: 5000 } });
-    controller.setModelMode('general', 'auto');
-    let form = controller.getSnapshot().drafts.general.form;
-    assert.equal(form.schemaVersion, 2);
-    assert.equal('output' in form, false);
-    assert.deepEqual(clone(form.reasoning), { mode: 'model-default' });
-    assert.equal(form.model.candidates[0].maxTokens, 5000);
-    assert.equal(form.model.candidates[0].provider, 'p');
-    assert.equal(form.model.candidates[0].model, 'm');
-    controller.updateCandidate('general', 0, { id: 'fast', purpose: 'Small tasks' });
-    assert.equal(controller.getSnapshot().drafts.general.form.model.defaultCandidate, 'fast');
-    controller.addCandidate('general');
-    controller.updateCandidate('general', 1, candidate('deep', { reasoning: { mode: 'fixed', effort: 'high' }, maxTokens: 8000 }));
-    form = controller.getSnapshot().drafts.general.form;
-    controller.updateForm('general', { model: { ...form.model, defaultCandidate: 'deep' } });
-    controller.addCandidate('general');
-    controller.addCandidate('general');
-    assert.equal(controller.getSnapshot().drafts.general.form.model.candidates.length, 3);
-    controller.removeCandidate('general', 2);
-    const authored = parse(await controller.materializeDraft('general'));
-    assert.equal(authored.model.defaultCandidate, 'deep');
-    assert.equal(authored.model.candidates[1].reasoning.effort, 'high');
-    assert.equal(authored.model.candidates[1].maxTokens, 8000);
-    assert.deepEqual(clone(plugin.formIssues(authored)), []);
-    assert.equal((await controller.save('general')).ok, true);
-    assert.deepEqual(parse(controller.getSnapshot().drafts.general.text), authored);
-    controller.removeCandidate('general', 1);
-    assert.equal(controller.getSnapshot().drafts.general.form.model.defaultCandidate, 'fast');
-    controller.removeCandidate('general', 0);
-    assert.equal(controller.getSnapshot().drafts.general.form.model.candidates.length, 1);
-  } finally { controller.dispose(); }
-});
-
-test('structured validation rejects incomplete candidates and invalid caps without an RPC', async () => {
-  const { controller, calls } = harness();
-  try {
-    await controller.loadCatalog();
-    for (const maxTokens of [0, -1, 1.5, 16777217, Number.NaN, '4096']) {
-      controller.updateForm('general', { output: { maxTokens } });
-      assert.equal((await controller.save('general')).ok, false);
-      assert.equal(controller.getSnapshot().errors.save.code, 'invalidForm');
-      assert.equal(controller.getSnapshot().errors.save.details.issues[0].key, 'invalidOutput');
-    }
-    controller.setModelMode('general', 'auto');
-    assert.equal((await controller.save('general')).ok, false);
-    assert.ok(controller.getSnapshot().errors.save.details.issues.some(issue => issue.key === 'invalidCandidate'));
-    controller.updateForm('general', { model: { mode: 'auto', defaultCandidate: 'missing', candidates: [candidate('same'), candidate('same')] } });
-    assert.equal((await controller.save('general')).ok, false);
-    assert.ok(controller.getSnapshot().errors.save.details.issues.some(issue => issue.key === 'invalidCandidates'));
-    for (const invalid of [candidate('Bad_ID'), candidate('ok', { purpose: 'x'.repeat(241) }), candidate('ok', { reasoning: { mode: 'fixed', effort: '' } }), candidate('ok', { maxTokens: 0 })]) {
-      assert.ok(plugin.formIssues({ ...autoRole(), model: { mode: 'auto', defaultCandidate: invalid.id, candidates: [invalid] } }).length > 0);
-    }
-    assert.equal(calls.filter(call => call.endpoint === 'agentdeck.save').length, 0);
-  } finally { controller.dispose(); }
-});
+const candidate = (id, extra = {}) => ({ id, purpose: 'Use for ' + id, provider: 'provider-' + id, model: 'model-' + id, reasoning: { mode: 'model-default' }, ...extra });
+const autoRole = () => ({ ...clone(general), schemaVersion: 3, model: { mode: 'auto', defaultCandidate: 'fast', candidates: [candidate('fast'), candidate('deep', { reasoning: { mode: 'fixed', effort: 'high' } })] }, reasoning: { mode: 'model-default' } });
 
 test('new feature controls cannot overwrite raw v1 or v2 imports and preserve CAS on refresh', async () => {
   for (const role of [general, autoRole()]) {
@@ -718,26 +596,25 @@ test('new feature controls cannot overwrite raw v1 or v2 imports and preserve CA
   }
 });
 
-test('preview facts keep declared metadata, authorization and validated output independent', () => {
-  const declaration = { configuredSelection: { provider: 'p', model: 'm', maxTokens: 4096 }, model: { provider: 'p', id: 'm', contextWindow: 100000 }, authorization: { status: 'unknown' }, output: { configuredMaxTokens: 4096, effectiveMaxTokens: 4096, source: 'candidate', validated: false }, capacity: { kind: 'configured', assemblyChecked: false } };
-  let facts = clone(plugin.previewFacts(declaration, ''));
-  assert.deepEqual(facts.authorization, { status: 'unknown' });
-  assert.equal(facts.configuredSelection.model, 'm');
-  assert.equal(facts.output.configuredMaxTokens, 4096);
-  assert.equal(facts.output.validated, false);
-  assert.equal(facts.capacity.kind, 'configured');
-  assert.equal(facts.capacity.assemblyChecked, false);
-  facts = clone(plugin.previewFacts({ ...declaration, authorization: { status: 'denied', message: 'Route denied' } }, 'session-a'));
-  assert.deepEqual(facts.authorization, { status: 'denied', message: 'Route denied' });
-  assert.equal(facts.configuredSelection.model, 'm');
-  assert.equal(facts.output.validated, false);
-  facts = clone(plugin.previewFacts({ ...declaration, authorization: { status: 'authorized' }, output: { configuredMaxTokens: 4096, effectiveMaxTokens: 3000, source: 'candidate', validated: true }, capacity: { kind: 'validated-parameters', assemblyChecked: false } }, 'session-a'));
-  assert.equal(facts.output.effectiveMaxTokens, 3000);
-  assert.equal(facts.output.validated, true);
-  assert.equal(facts.capacity.assemblyChecked, false);
-  assert.equal(plugin.previewFacts({ authorization: { status: 'authorized' } }, '').authorization.status, 'unknown');
+test('preview facts keep native recovery and Session authorization independent', () => {
+  const preview = { configuredSelection: { provider: 'p', model: 'm' }, effectiveSelection: { provider: 'p', model: 'm', maxTokens: 3000 }, authorization: { status: 'authorized' }, recovery: { policy: 'native', contextWindow: 131072 } };
+  const facts = plugin.previewFacts(preview, 'session-a');
+  assert.deepEqual(clone(facts.recovery), preview.recovery);
+  assert.deepEqual(clone(facts.effectiveSelection), preview.effectiveSelection);
+  assert.equal(facts.authorization.status, 'authorized');
+  assert.equal(plugin.previewFacts(preview, '').authorization.status, 'unknown');
   assert.equal(plugin.previewFacts(null, 'session-a').authorization.status, 'unknown');
-  assert.equal(plugin.previewFacts(null, 'session-a').output.validated, false);
+  assert.equal(plugin.previewFacts(null, '').recovery.policy, 'native');
+});
+
+test('no-Session preview diagnostics become an informational hint while real diagnostics remain visible', () => {
+  const session = 'Select a live Session to validate authorization and effective output parameters. Model declarations and configured capacity are not task admission.';
+  const inherited = 'Select a live Session to resolve inherited model parameters.';
+  assert.equal(plugin.previewNeedsSession([session]), true);
+  assert.equal(plugin.previewNeedsSession([inherited]), true);
+  assert.deepEqual(plugin.previewDiagnostics([session, 'Model declaration: provider unavailable', inherited]), ['Model declaration: provider unavailable']);
+  assert.deepEqual(plugin.previewDiagnostics([session], 'session-a'), [session]);
+  assert.deepEqual(plugin.previewDiagnostics(['Native parameter validation: invalid route']), ['Native parameter validation: invalid route']);
 });
 
 test('candidate preview sends the saved revision and ignores obsolete candidate responses', async () => {
@@ -892,20 +769,6 @@ test('a failed explicit recheck removes the role cache immediately and cannot re
   assert.equal(plugin.roleStatus(plugin.roleView(browserRole,controller.getSnapshot().evidence[browserRole.id]?.preview,true)),'capabilityUnknown');
  } finally { controller.dispose(); }
 });
-test('changed setup inputs discard delayed suggestions', async () => {
- const pending=deferred();const {controller}=harness(call=>call.endpoint==='agentdeck.recommend'?pending.promise:ok(catalog()));
- await controller.loadCatalog();controller.updateSetup({roleIds:['general'],defaultRoute:{provider:'p',model:'a'}});const work=controller.recommendSetup();
- controller.updateSetup({defaultRoute:{provider:'p',model:'b'}});pending.resolve(ok({rows:[]}));await work;assert.equal(controller.getSnapshot().setupProposal,null);controller.dispose();
-});
-test('lost setup response reads back exact texts without automatically resubmitting', async () => {
- const row={id:'general',applicable:true,roleRevision:'factory-r1',proposedText:'proposed'};let writes=0;
- const {controller,calls}=harness(call=>{if(call.endpoint==='agentdeck.applySetup'){writes++;throw new Error('Lost response');}return ok(catalog(writes?[{id:'general',text:'proposed',revision:'new'}]:[]));});
- await controller.loadCatalog();controller.set({setupProposal:{rows:[row]},setupSelected:{general:true},setupPreviewReady:true});await controller.applySetup();
- assert.equal(writes,1);assert.equal(controller.getSnapshot().setupResult.rows[0].status,'observed');assert.equal(controller.getSnapshot().setupProposal,null);
- await controller.applySetup();assert.equal(calls.filter(call=>call.endpoint==='agentdeck.applySetup').length,1);controller.dispose();
-});
-
-
 test('typed unknown single writes reconcile save and reset without resubmitting', async () => {
  for (const kind of ['save', 'reset']) {
   let committed = false;
@@ -928,154 +791,6 @@ test('typed unknown single writes reconcile save and reset without resubmitting'
  }
 });
 
-test('successful batch responses reconcile uncertain rows from exact text readback', async () => {
- const proposed = 'schemaVersion: 1\nid: general\nenabled: false\n';
- let committed = false;
- const { controller, calls } = harness(call => {
-  if (call.endpoint === 'agentdeck.applySetup') { committed = true; return ok({ status: 'stopped', rows: [{ id: 'general', status: 'uncertain', message: 'write confirmation unavailable' }] }); }
-  return ok(catalog(committed ? [{ id: 'general', text: proposed, revision: 'override-r2' }] : []));
- });
- try {
-  await controller.loadCatalog();
-  controller.set({ setupProposal: { rows: [{ id: 'general', applicable: true, roleRevision: 'factory-r1', proposedText: proposed }] }, setupSelected: { general: true }, setupPreviewReady: true });
-  const answer = await controller.applySetup();
-  assert.equal(answer.ok, true);
-  assert.equal(controller.getSnapshot().setupResult.rows[0].status, 'observed');
-  assert.equal(calls.filter(call => call.endpoint === 'agentdeck.applySetup').length, 1);
- } finally { controller.dispose(); }
-});
-
-for (const change of ['Session change', 'newer catalog read']) {
- test('canceled setup readback cannot publish an obsolete result after ' + change, async () => {
-  const pending = deferred(), started = deferred(); let reads = 0, writes = 0;
-  const row = { id: 'general', applicable: true, roleRevision: general.revision, proposedText: 'proposed' };
-  const { controller } = harness(call => {
-   if (call.endpoint === 'agentdeck.applySetup') { writes++; throw new Error('Lost response'); }
-   if (++reads === 2) { started.resolve(); return pending.promise; }
-   return ok(catalog());
-  });
-  try {
-   await controller.loadCatalog();
-   controller.set({ setupProposal: { rows: [row] }, setupSelected: { general: true }, setupPreviewReady: true });
-   const work = controller.applySetup(); await started.promise;
-   if (change === 'Session change') controller.setSession('session-b');
-   await controller.loadCatalog(); await work;
-   assert.equal(controller.getSnapshot().sessionId, change === 'Session change' ? 'session-b' : '');
-   assert.equal(controller.getSnapshot().setupResult, null);
-   assert.equal(writes, 1);
-   pending.resolve(ok(catalog([{ id: 'general', text: 'proposed', revision: 'new' }])));
-   await Promise.resolve();
-   assert.equal(controller.getSnapshot().setupResult, null);
-  } finally { pending.resolve(ok(catalog())); controller.dispose(); }
- });
-}
-test('an actual setup readback failure still reports uncertain rows without resubmitting', async () => {
- let writes = 0;
- const row = { id: 'general', applicable: true, roleRevision: general.revision, proposedText: 'proposed' };
- const { controller } = harness(call => {
-  if (call.endpoint === 'agentdeck.applySetup') { writes++; throw new Error('Lost response'); }
-  if (writes) throw new Error('Catalog unavailable');
-  return ok(catalog());
- });
- try {
-  await controller.loadCatalog();
-  controller.set({ setupProposal: { rows: [row] }, setupSelected: { general: true }, setupPreviewReady: true });
-  await controller.applySetup();
-  assert.equal(controller.getSnapshot().setupResult.rows[0].status, 'unknown');
-  assert.equal(writes, 1);
- } finally { controller.dispose(); }
-});
-
-test('setup preview uses the exact clean selection and a pending recheck blocks apply', async () => {
- const pending=deferred();const before={model:{mode:'inherit'},reasoning:{mode:'inherit-compatible'},context:{targetTokens:16000,elasticTokens:48000}};
- const rows=['general','reader'].map(id=>({id,title:general.title,applicable:true,roleRevision:'factory-r1',proposedText:id,before,after:before,reasons:[],warnings:[]}));
- let wait=false;const {controller,calls}=harness(call=>call.endpoint==='agentdeck.recommend'?ok({rows}):call.endpoint==='agentdeck.previewSetup'?wait?pending.promise:ok({resources:{reader:before,general:before}}):ok(catalog([], [general,{...general,id:'reader'}])));
- try {
-  await controller.loadCatalog();controller.edit('general','unsaved');await controller.recommendSetup();
-  assert.deepEqual(calls.find(call=>call.endpoint==='agentdeck.previewSetup').payload.rows.map(row=>row.id),['reader']);
-  assert.equal(controller.getSnapshot().setupPreviewReady,true);wait=true;controller.discard('general');
-  const work=controller.selectSetup('general',true);
-  assert.equal(controller.getSnapshot().setupPreviewReady,false);assert.equal((await controller.applySetup()).ok,false);
-  pending.resolve(ok({resources:{reader:{...before,context:{targetTokens:16000,elasticTokens:27129}},general:before}}));await work;
-  assert.equal(controller.getSnapshot().setupProposal.rows.find(row=>row.id==='reader').after.context.elasticTokens,27129);
-  assert.equal(controller.getSnapshot().setupPreviewReady,true);assert.equal(calls.some(call=>call.endpoint==='agentdeck.applySetup'),false);
- }finally{controller.dispose();}
-});
-test('obsolete setup subset previews cannot replace a newer checkbox selection', async () => {
- const old=deferred();const latest=deferred();let reads=0;const before={model:{mode:'inherit'},reasoning:{mode:'inherit-compatible'},context:{targetTokens:16000,elasticTokens:48000}};
- const rows=['general','reader'].map(id=>({id,title:general.title,applicable:true,roleRevision:'factory-r1',proposedText:id,before,after:before,reasons:[],warnings:[]}));
- const {controller}=harness(call=>call.endpoint==='agentdeck.recommend'?ok({rows}):call.endpoint==='agentdeck.previewSetup'?++reads===1?ok({resources:{reader:before,general:before}}):reads===2?old.promise:latest.promise:ok(catalog()));
- try {
-  await controller.loadCatalog();await controller.recommendSetup();const first=controller.selectSetup('general',false);const second=controller.selectSetup('general',true);
-  latest.resolve(ok({resources:{reader:{...before,context:{targetTokens:16000,elasticTokens:27129}},general:before}}));await second;
-  old.resolve(ok({resources:{reader:before,general:before}}));await first;
-  assert.equal(controller.getSnapshot().setupSelected.general,true);assert.equal(controller.getSnapshot().setupProposal.rows[1].after.context.elasticTokens,27129);
- }finally{controller.dispose();}
-});
-
-for (const change of ['Session change', 'catalog refresh']) {
- test('setup scope drops removed roles on ' + change + ' while retaining valid choices and drafts', async () => {
-  const project = { ...general, id: 'project-agent', builtin: false };
-  const reader = { ...general, id: 'reader' };
-  let agents = [general, project, reader];
-  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.recommend' ? ok({ rows: [] }) : ok(catalog([], agents)));
-  try {
-   await controller.loadCatalog();
-   controller.updateSetup({ roleIds: ['project-agent', 'general'] });
-   controller.edit('project-agent', 'unsaved project draft');
-   agents = [general, reader];
-   if (change === 'Session change') await controller.setSetupSession('session-a');
-   else await controller.loadSetupCatalog();
-   await controller.recommendSetup();
-   assert.deepEqual(calls.find(call => call.endpoint === 'agentdeck.recommend').payload.roleIds, ['general']);
-   assert.deepEqual(clone(controller.getSnapshot().setupOptions.roleIds), ['general']);
-   assert.equal(controller.getSnapshot().drafts['project-agent'].text, 'unsaved project draft');
-  } finally { controller.dispose(); }
- });
-}
-for (const code of ['setup.sourceOwned', 'setup.browserExcluded']) {
- test('read-only inherited setup results stay current for ' + code + ' without making the row selectable', async () => {
-  const before = { model: { mode: 'inherit' }, reasoning: { mode: 'inherit-compatible' }, context: { targetTokens: 16000, elasticTokens: 48000 } };
-  const after = { ...before, model: { mode: 'fixed', provider: 'p', model: 'small' }, context: { targetTokens: 16000, elasticTokens: 27129 } };
-  const rows = [
-   { id: 'general', title: general.title, applicable: true, roleRevision: general.revision, proposedText: 'general patch', before, reasons: [], warnings: [] },
-   { id: 'derived-reader', title: general.title, applicable: false, roleRevision: 'derived-r1', before, reasons: [], warnings: [{ code }] },
-  ];
-  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.recommend' ? ok({ rows }) : call.endpoint === 'agentdeck.previewSetup' ? ok({ resources: { general: after, 'derived-reader': after } }) : ok(catalog()));
-  try {
-   await controller.loadCatalog(); await controller.recommendSetup();
-   const derived = () => controller.getSnapshot().setupProposal.rows.find(row => row.id === 'derived-reader');
-   assert.ok(derived().after, 'Inherited display resources must be present');
-   assert.deepEqual(clone(derived().after), after);
-   assert.equal(derived().applicable, false);
-   assert.equal(controller.getSnapshot().setupSelected['derived-reader'], false);
-   assert.deepEqual(calls.find(call => call.endpoint === 'agentdeck.previewSetup').payload.rows.map(row => row.id), ['general']);
-   assert.equal((await controller.selectSetup('derived-reader', true)).ok, false);
-   await controller.selectSetup('general', false);
-   assert.deepEqual(clone(derived().after), before);
-   assert.equal(controller.getSnapshot().setupPreviewReady, true);
-   await controller.selectSetup('general', true);
-   assert.deepEqual(clone(derived().after), after);
-   assert.equal(controller.getSnapshot().setupSelected['derived-reader'], false);
-  } finally { controller.dispose(); }
- });
-}
-test('omitted inherited setup results prevent applying an incomplete impact preview', async () => {
- const before = { model: { mode: 'inherit' }, reasoning: { mode: 'inherit-compatible' }, context: general.context };
- const rows = [
-  { id: 'general', title: general.title, applicable: true, roleRevision: general.revision, proposedText: 'general patch', before, reasons: [], warnings: [] },
-  { id: 'derived-reader', title: general.title, applicable: false, roleRevision: 'derived-r1', before, reasons: [], warnings: [] },
- ];
- const { controller, calls } = harness(call => call.endpoint === 'agentdeck.recommend' ? ok({ rows }) : call.endpoint === 'agentdeck.previewSetup' ? ok({ resources: { general: before } }) : ok(catalog()));
- try {
-  await controller.loadCatalog(); await controller.recommendSetup();
-  assert.equal(controller.getSnapshot().setupPreviewReady, false);
-  assert.equal(controller.getSnapshot().errors.setupPreview.code, 'malformedResponse');
-  assert.equal((await controller.applySetup()).ok, false);
-  assert.equal(calls.some(call => call.endpoint === 'agentdeck.applySetup'), false);
- } finally { controller.dispose(); }
-});
-
 test('catalog reload clears both list evidence and the unchanged detail preview', async () => {
  const {controller}=harness(call=>ok(call.endpoint==='agentdeck.preview'?clone(readyBrowserPreview):catalog([], [browserRole])));
  try {
@@ -1093,4 +808,239 @@ test('catalog reload rejects a delayed preview even when the role revision is un
   pending.resolve(ok(clone(readyBrowserPreview)));await work;
   assert.equal(controller.getSnapshot().preview,null);assert.deepEqual(clone(controller.getSnapshot().evidence),{});
  } finally {controller.dispose();}
+});
+
+const modelBundle = roles => JSON.stringify({ format: 'dsh-agentdeck-models', version: 1, roles });
+const autoTransfer = {
+  model: { mode: 'auto', defaultCandidate: 'large', candidates: [
+    { id: 'small', purpose: 'Fast checks', provider: 'remote', model: 'old-small', reasoning: { mode: 'model-default' } },
+    { id: 'large', purpose: 'Deep review', provider: 'remote', model: 'old-large', reasoning: { mode: 'fixed', effort: 'xhigh' } },
+  ] }, reasoning: { mode: 'model-default' },
+};
+const localModelResponse = call => ok({ providers: [{ id: 'local', name: 'Local' }], diagnostics: [], models: call.payload.model ? [{ provider: 'local', id: call.payload.model, metadataResolved: call.payload.model !== 'missing', efforts: ['low', 'high'], inputModalities: ['text'], authorized: null }] : [] });
+function transferSettled(controller) {
+  if (!controller.getSnapshot().transfer?.checking) return Promise.resolve();
+  return new Promise(resolve => {
+    const dispose = controller.subscribe(() => { if (!controller.getSnapshot().transfer?.checking) { dispose(); resolve(); } });
+  });
+}
+
+test('portable model bundles preserve candidate order and defaults and exclude non-model settings', () => {
+  const input = { ...general, ...autoTransfer, instructions: 'PRIVATE', apiKey: 'SECRET', source: '/private/path', skills: ['private-skill'] };
+  const text = plugin.modelTransfer.write([input]);
+  const bundle = clone(plugin.modelTransfer.read('\uFEFF' + text));
+  assert.deepEqual(bundle.roles, [{ id: 'general', ...autoTransfer }]);
+  for (const excluded of ['PRIVATE', 'SECRET', '/private/path', 'private-skill', 'instructions']) assert.equal(text.includes(excluded), false);
+  for (const invalid of [modelBundle([]), modelBundle([input, input]), JSON.stringify({ format: 'dsh-agentdeck-models', version: 2, roles: [input] }), '{', modelBundle([{ ...input, model: { ...autoTransfer.model, defaultCandidate: 'absent' } }])]) {
+    assert.throws(() => plugin.modelTransfer.read(invalid), error => error.code === 'modelTransferInvalid');
+  }
+  assert.throws(() => plugin.modelTransfer.read(' '.repeat(1024 * 1024 + 1)), error => error.code === 'importTooLarge');
+});
+
+test('portable export selects saved role settings even when a local draft is dirty', async () => {
+  const { controller, calls } = harness();
+  try {
+    await controller.loadCatalog();
+    controller.updateForm('general', autoTransfer);
+    controller.openModelExport();
+    const packet = JSON.parse(controller.exportModels());
+    assert.deepEqual(packet.roles, [{ id: 'general', model: general.model, reasoning: general.reasoning }]);
+    controller.updateModelTransfer(0, { selected: false });
+    assert.throws(() => controller.exportModels(), error => error.code === 'modelTransferInvalid');
+    assert.equal(calls.some(call => call.endpoint === 'agentdeck.save'), false);
+  } finally { controller.dispose(); }
+});
+
+test('portable import maps local routes and efforts, preserves role fields and stages without saving', async () => {
+  const stored = 'schemaVersion: 3\nid: general\ninstructions: Keep my local instructions.\nenabled: false\n';
+  const role = { ...general, instructions: 'Keep my local instructions.', enabled: false };
+  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.catalog' ? ok(catalog([{ id: 'general', text: stored, revision: 'saved-r1' }], [role])) : call.endpoint === 'agentdeck.models' ? localModelResponse(call) : ok({}));
+  try {
+    await controller.loadCatalog();
+    assert.equal(controller.importModels(modelBundle([{ id: 'general', ...autoTransfer }])), true);
+    await transferSettled(controller);
+    assert.equal(controller.transferIssue(controller.getSnapshot().transfer.rows[0]), 'transferProviderMissing');
+    controller.mapTransferRoute(0, 'small', { provider: 'local', model: 'small' });
+    controller.mapTransferRoute(0, 'large', { provider: 'local', model: 'large' });
+    await controller.loadModelMetadata('local', 'small'); await controller.loadModelMetadata('local', 'large');
+    assert.equal(controller.transferIssue(controller.getSnapshot().transfer.rows[0]), 'transferEffortMissing');
+    assert.equal(controller.getSnapshot().transfer.rows[0].config.model.candidates[1].reasoning.effort, 'xhigh', 'Mapping a model must not silently weaken reasoning');
+    controller.mapTransferRoute(0, 'large', { reasoning: { mode: 'fixed', effort: 'high' } });
+    assert.equal(await controller.previewModelTransfer(), true);
+    const preview = calls.find(call => call.endpoint === 'agentdeck.previewChange');
+    assert.equal(preview.payload.expectedRevision, 'saved-r1');
+    assert.deepEqual(preview.payload.actions.map(action => action.path), [['schemaVersion'], ['model'], ['reasoning']]);
+    assert.equal(controller.adoptModelTransfer(), true);
+    const draft = controller.getSnapshot().drafts.general;
+    assert.equal(draft.form.instructions, role.instructions);
+    assert.equal(draft.form.enabled, false);
+    assert.equal(parse(draft.text).instructions, role.instructions);
+    assert.equal(draft.expectedRevision, 'saved-r1');
+    assert.equal(draft.form.model.defaultCandidate, 'large');
+    assert.deepEqual(clone(draft.form.model.candidates.map(item => [item.id, item.purpose, item.provider, item.model])), [['small', 'Fast checks', 'local', 'small'], ['large', 'Deep review', 'local', 'large']]);
+    assert.equal(calls.some(call => call.endpoint === 'agentdeck.save'), false);
+    assert.equal(controller.getSnapshot().transfer, null);
+  } finally { controller.dispose(); }
+});
+
+test('portable import requires explicit missing-role mapping and rejects duplicate destinations', async () => {
+  const { controller } = harness(call => call.endpoint === 'agentdeck.models' ? localModelResponse(call) : ok(catalog()));
+  try {
+    await controller.loadCatalog();
+    controller.importModels(modelBundle([{ id: 'general', model: general.model, reasoning: general.reasoning }, { id: 'remote-custom', model: general.model, reasoning: general.reasoning }]));
+    await transferSettled(controller);
+    assert.equal(controller.getSnapshot().transfer.rows[1].selected, false);
+    controller.updateModelTransfer(1, { targetId: 'general', selected: true });
+    assert.equal(controller.transferIssue(controller.getSnapshot().transfer.rows[0]), 'transferDuplicateTarget');
+    assert.equal(await controller.previewModelTransfer(), false);
+    controller.updateModelTransfer(0, { selected: false });
+    assert.equal(await controller.previewModelTransfer(), true);
+    assert.equal(controller.adoptModelTransfer(), true);
+  } finally { controller.dispose(); }
+});
+
+test('portable import protects all existing drafts and rejects changes made after preview', async () => {
+  const second = { ...general, id: 'reviewer' };
+  const { controller } = harness(call => call.endpoint === 'agentdeck.catalog' ? ok(catalog([], [general, second])) : call.endpoint === 'agentdeck.models' ? localModelResponse(call) : ok({}));
+  try {
+    await controller.loadCatalog();
+    controller.importModels(modelBundle([general, second])); await transferSettled(controller);
+    controller.updateForm('reviewer', { instructions: 'An unsaved local edit' });
+    assert.equal(await controller.previewModelTransfer(), false);
+    assert.equal(controller.transferIssue(controller.getSnapshot().transfer.rows[1]), 'transferDraftConflict');
+    controller.discard('reviewer');
+    assert.equal(await controller.previewModelTransfer(), true);
+    const first = controller.getSnapshot().drafts.general;
+    controller.updateForm('reviewer', { instructions: 'A newer edit after preview' });
+    assert.equal(controller.adoptModelTransfer(), false);
+    assert.equal(controller.getSnapshot().drafts.general, first, 'No selected row may be partially staged');
+    assert.equal(controller.getSnapshot().drafts.reviewer.form.instructions, 'A newer edit after preview');
+  } finally { controller.dispose(); }
+});
+
+test('portable import detects catalog revision conflicts and does not overwrite managed external roles', async () => {
+  let revised = false;
+  const { controller } = harness(call => call.endpoint === 'agentdeck.catalog' ? ok(catalog([], [{ ...general, revision: revised ? 'new-r2' : general.revision }])) : call.endpoint === 'agentdeck.models' ? localModelResponse(call) : ok({}));
+  try {
+    await controller.loadCatalog(); controller.importModels(modelBundle([general])); await transferSettled(controller);
+    assert.equal(await controller.previewModelTransfer(), true);
+    revised = true; await controller.loadCatalog();
+    assert.equal(controller.adoptModelTransfer(), false);
+    assert.equal(controller.transferIssue(controller.getSnapshot().transfer.rows[0]), 'transferChanged');
+    controller.set({ catalog: catalog([], [{ ...general, source: 'shared:/local/team.yml' }]) });
+    controller.updateModelTransfer(0, { targetId: 'general' });
+    assert.equal(controller.transferIssue(controller.getSnapshot().transfer.rows[0]), 'transferSourceOwned');
+  } finally { controller.dispose(); }
+});
+
+test('late import previews cannot reopen a closed panel or cross a Session boundary', async () => {
+  for (const close of [controller => controller.set({ transfer: null }), controller => controller.setSession('session-a')]) {
+    const pending = deferred();
+    const { controller } = harness(call => call.endpoint === 'agentdeck.catalog' ? ok(catalog()) : call.endpoint === 'agentdeck.models' ? localModelResponse(call) : pending.promise);
+    try {
+      await controller.loadCatalog(); controller.importModels(modelBundle([general])); await transferSettled(controller);
+      const original = controller.getSnapshot().drafts.general;
+      const work = controller.previewModelTransfer(); close(controller);
+      pending.resolve(ok({ id: 'general', text: 'id: general\n', impacts: [], impactRevision: 'late' }));
+      assert.equal(await work, false);
+      assert.equal(controller.getSnapshot().transfer, null);
+      assert.equal(controller.getSnapshot().drafts.general, original);
+      if (controller.getSnapshot().sessionId) assert.equal(controller.importModels(modelBundle([general])), false);
+    } finally { controller.dispose(); }
+  }
+});
+
+test('portable candidate skipping requires an explicit replacement default and keeps a nonempty pool', async () => {
+  const { controller } = harness(call => call.endpoint === 'agentdeck.models' ? localModelResponse(call) : ok(catalog()));
+  try {
+    await controller.loadCatalog(); controller.importModels(modelBundle([{ id: 'general', ...autoTransfer }])); await transferSettled(controller);
+    assert.equal(controller.removeTransferRoute(0, 'large'), false);
+    assert.equal(controller.setTransferDefault(0, 'absent'), false);
+    assert.equal(controller.setTransferDefault(0, 'small'), true);
+    assert.equal(controller.removeTransferRoute(0, 'large'), true);
+    assert.equal(controller.removeTransferRoute(0, 'small'), false);
+    controller.mapTransferRoute(0, 'small', { provider: 'local', model: 'small' });
+    await controller.loadModelMetadata('local', 'small');
+    assert.equal(await controller.previewModelTransfer(), true);
+    assert.equal(controller.adoptModelTransfer(), true);
+    const model = controller.getSnapshot().drafts.general.form.model;
+    assert.equal(model.defaultCandidate, 'small');
+    assert.deepEqual(clone(model.candidates.map(item => [item.id, item.purpose])), [['small', 'Fast checks']]);
+  } finally { controller.dispose(); }
+});
+
+test('failed local metadata recheck cannot reuse a previously valid import preview or cache', async () => {
+  let failed = false;
+  const role = { ...general, model: { mode: 'fixed', provider: 'local', model: 'example' }, reasoning: { mode: 'model-default' } };
+  const { controller } = harness(call => call.endpoint === 'agentdeck.models' ? failed && call.payload.model ? { ok: false, error: { code: 'lookupFailed', message: 'Local model lookup failed' } } : localModelResponse(call) : ok(catalog()));
+  try {
+    await controller.loadCatalog(); controller.importModels(modelBundle([role])); await transferSettled(controller);
+    assert.equal(await controller.previewModelTransfer(), true);
+    failed = true; await controller.checkModelTransfer(true);
+    assert.equal(controller.transferIssue(controller.getSnapshot().transfer.rows[0]), 'transferUnresolved');
+    assert.equal(controller.adoptModelTransfer(), false);
+    assert.equal(controller.getSnapshot().drafts.general.form.model.mode, 'inherit');
+  } finally { controller.dispose(); }
+});
+
+test('portable route validation blocks unresolved, image-only and unsupported reasoning metadata', () => {
+  const route = { provider: 'local', model: 'example', reasoning: { mode: 'fixed', effort: 'high' } };
+  assert.equal(plugin.modelTransfer.routeIssue(route, { metadataResolved: false }), 'transferUnresolved');
+  assert.equal(plugin.modelTransfer.routeIssue(route, { metadataResolved: true, inputModalities: ['image'] }), 'transferTextRequired');
+  assert.equal(plugin.modelTransfer.routeIssue(route, { metadataResolved: true, inputModalities: ['text'], efforts: ['low'] }), 'transferEffortMissing');
+  assert.equal(plugin.modelTransfer.routeIssue(route, { metadataResolved: true, inputModalities: ['text'], efforts: ['high'], authorized: false }), '', 'Importing preferences must remain separate from native Session authorization');
+  assert.equal(plugin.modelTransfer.routeIssue(route, { metadataResolved: true, inputModalities: ['text'], efforts: [{ id: 'high', name: 'High' }] }), '', 'Structured native effort metadata must match by id');
+});
+
+test('portable preview failure cannot leak into a closed or replaced transfer panel', async () => {
+  for (const replace of [controller => controller.set({ transfer: null }), controller => controller.openModelExport(), controller => controller.importModels(modelBundle([general]))]) {
+    const pending = deferred();
+    const { controller, calls } = harness(call => call.endpoint === 'agentdeck.catalog' ? ok(catalog()) : call.endpoint === 'agentdeck.models' ? localModelResponse(call) : pending.promise);
+    try {
+      await controller.loadCatalog(); controller.importModels(modelBundle([general])); await transferSettled(controller);
+      const work = controller.previewModelTransfer();
+      const previewCall = calls.find(call => call.endpoint === 'agentdeck.previewChange');
+      replace(controller);
+      pending.resolve({ ok: false, error: { code: 'oldPreviewFailed', message: 'An obsolete preview failed' } });
+      assert.equal(await work, false);
+      assert.equal(controller.getSnapshot().errors.transfer, null, 'An obsolete error must not appear in a different panel');
+      assert.equal(previewCall.signal.aborted, true, 'Closing or replacing the panel must cancel its read');
+    } finally { controller.dispose(); }
+  }
+});
+
+test('portable transfer stays locked while a write receipt is pending', { timeout: 2000 }, async () => {
+  const receipt = deferred();
+  const second = { ...general, id: 'reviewer' };
+  let catalogReads = 0;
+  const { controller, calls } = harness(call => call.endpoint === 'agentdeck.catalog' ? ++catalogReads === 1 ? ok(catalog([], [general, second])) : receipt.promise : call.endpoint === 'agentdeck.models' ? localModelResponse(call) : call.endpoint === 'agentdeck.save' ? { ok: false, error: { code: 'AGENTDECK_WRITE_OUTCOME_UNKNOWN', message: 'write outcome unknown' } } : ok({}));
+  try {
+    await controller.loadCatalog();
+    const config = { ...autoTransfer, model: { ...autoTransfer.model, candidates: autoTransfer.model.candidates.map(item => ({ ...item, provider: 'local', model: item.id, reasoning: { mode: 'model-default' } })) } };
+    controller.importModels(modelBundle([{ id: 'general', ...config }])); await transferSettled(controller);
+    assert.equal(await controller.previewModelTransfer(), true);
+    controller.updateForm('reviewer', { enabled: false });
+    const saving = controller.save('reviewer');
+    await Promise.race([new Promise(resolve => {
+      if (controller.getSnapshot().busy.changeReceipt) return resolve();
+      const off = controller.subscribe(() => { if (controller.getSnapshot().busy.changeReceipt) { off(); resolve(); } });
+    }), saving.then(answer => { throw new Error('Save completed before receipt: ' + JSON.stringify(answer)); })]);
+    const transfer = controller.getSnapshot().transfer;
+    const draft = controller.getSnapshot().drafts.general;
+    const requestCount = calls.length;
+    assert.equal(controller.importModels(modelBundle([general])), false);
+    controller.updateModelTransfer(0, { selected: false });
+    controller.mapTransferRoute(0, 'small', { model: 'another' });
+    assert.equal(controller.setTransferDefault(0, 'small'), false);
+    assert.equal(controller.removeTransferRoute(0, 'small'), false);
+    await controller.checkModelTransfer(true);
+    assert.equal(await controller.previewModelTransfer(), false);
+    assert.equal(controller.adoptModelTransfer(), false);
+    assert.equal(controller.getSnapshot().transfer, transfer, 'The ready import must remain unchanged while the receipt is pending');
+    assert.equal(controller.getSnapshot().drafts.general, draft);
+    assert.equal(calls.length, requestCount, 'Blocked transfer actions must not issue RPCs');
+    receipt.resolve(ok(catalog([], [general, second])));
+    await saving;
+    assert.equal(controller.adoptModelTransfer(), true, 'The same ready preview can be adopted once the receipt completes');
+  } finally { receipt.resolve(ok(catalog([], [general, second]))); controller.dispose(); }
 });

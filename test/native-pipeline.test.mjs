@@ -94,7 +94,7 @@ test('explicit fields enforce parent route when the calling Session has no model
   }
 });
 
-test('native route policy and complete effort selection are enforced over static defaults', async () => {
+test('native route policy rejects incomplete or forbidden selections and preserves explicit effort', async () => {
   const h = await createNativeHarness({
     policy: [{ provider: ROUTE.provider, model: 'allowed' }],
     toolOptions: { agentOptions: { provider: ROUTE.provider, model: 'forbidden' } },
@@ -110,7 +110,9 @@ test('native route policy and complete effort selection are enforced over static
     }
     const effortOnly = await h.invoke({ reasoning_effort: 'high' });
     assert.equal(effortOnly.isError, true);
-    assert.match(textOf(effortOnly), /reasoning_effort.*requires both.*provider.*model/);
+    // Published hosts differ in preflight order: rc.1 checks the forbidden
+    // default route; newer hosts first reject incomplete explicit effort.
+    assert.match(textOf(effortOnly), /reasoning_effort.*requires both.*provider.*model|not allowed for this Session/);
     assert.equal(h.adapter.resolutions.length, 0);
     assert.equal(h.starts.length, 0);
     const accepted = await h.invoke({ provider: ROUTE.provider, model: 'allowed', reasoning_effort: 'high' });

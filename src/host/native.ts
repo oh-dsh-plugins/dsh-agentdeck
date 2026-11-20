@@ -2,7 +2,9 @@ import { createScope } from '@deepseek-ai/dsh-scope';
 import * as nativeSubagent from '@deepseek-ai/dsh-tool-subagent';
 import { ToolExecutionPipeline } from '@deepseek-ai/dsh-tools/pipeline';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
-import type { HostContext, RoleSnapshot } from './types.js';
+import type { HostContext, RoleSnapshot, RuntimeAgent } from './types.js';
+import type { TaskCommands } from './contracts.js';
+import { activationSession } from './sessions.js';
 
 export class NativeDelegationFailure extends Error {
   readonly code: string;
@@ -12,7 +14,7 @@ export class NativeDelegationFailure extends Error {
 }
 
 /** Each fixed capability is private; source lookup never changes the real caller. */
-export class NativeDelegator {
+export class NativeDelegator implements TaskCommands {
   private readonly entries = new Map<string, Promise<{ key: object; name: string; dispose(): Promise<void> }>>();
   private closed = false;
   constructor(private readonly ctx: HostContext) {}
@@ -41,7 +43,7 @@ export class NativeDelegator {
   async invoke(presetId: string | undefined, args: Record<string, unknown>, outer: ToolRunContext, snapshot?: RoleSnapshot): Promise<string> {
     if (!outer.agent) throw new Error('Native delegation requires a real calling Agent.');
     outer.signal.throwIfAborted();
-    const entry = await this.entry(presetId, snapshot?.model.maxTokens);
+    const entry = await this.entry(presetId, snapshot?.policyVersion === 1 ? snapshot.model.maxTokens : undefined);
     if (!this.ctx.tools.executable(entry.name, entry.key)) throw new NativeDelegationFailure('Native spawn provider is unavailable; no child was started.', true, 'AGENTDECK_PROVIDER_UNAVAILABLE');
     const pipeline = new ToolExecutionPipeline(this.ctx, {
       get: name => name === entry.name && !this.closed ? this.ctx.tools.executable(entry.name, entry.key) : undefined,
@@ -57,10 +59,15 @@ export class NativeDelegator {
     for (const context of result.additionalContexts ?? []) outer.deferContext(context);
     if (result.isError) throw new NativeDelegationFailure(result.error.message, beforeDispatch, result.error.info?.code);
     if (result.concludesTurn) outer.concludeTurn();
-    const value = result.value as any;
-    if (value?.kind !== 'activation' || typeof value.name !== 'string') throw new NativeDelegationFailure('Native delegation did not return an activation name; do not retry blindly.', false);
-    try { return await this.ctx.subagents.resolveName(outer.agent, value.name, outer.signal); }
+    try { return await activationSession(result.value, outer.agent, outer.signal, this.ctx.subagents); }
     catch (error) { throw new NativeDelegationFailure(`Native child was accepted but its Session identity could not be resolved: ${error instanceof Error ? error.message : String(error)}. Reconcile the existing startup; do not repeat it.`, false); }
+  }
+  async send(actor: RuntimeAgent, childId: string, text: string, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted();
+    return this.ctx.subagents.sendMessage(actor, childId as Parameters<HostContext['subagents']['sendMessage']>[1], [{ type: 'text', text }], { signal });
+  }
+  interrupt(actor: RuntimeAgent, childId: string): void {
+    this.ctx.subagents.interrupt(childId as Parameters<HostContext['subagents']['interrupt']>[0], { kind: 'ancestor', agent: actor });
   }
   async dispose(): Promise<void> {
     this.closed = true;

@@ -5,6 +5,7 @@ import { loadBuiltinAgents } from './core/index.js';
 import { AgentDeckStore, WriteOutcomeUnknownError } from './host/store.js';
 import { AgentDeckController, ChangeImpactError } from './host/controller.js';
 import { ResultRevisionError } from './host/results.js';
+import { SuggestionError } from './host/suggestions.js';
 import { object, requiredString, optionalString, messageOf, jsonClone } from './host/types.js';
 import type { HostContext, RuntimeAgent, JsonObject } from './host/types.js';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
@@ -27,7 +28,7 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
 
   const read = defineTool({
     name: 'scene_agent_catalog',
-    description: 'Discover ready-to-use AgentDeck scene agents, their actual model options, effective budgets and task records. Use general when no specialist fits. Availability includes the saved default route authorization for this Session; unknown is not approval. Read details only when needed; simple known-file work can use tools directly. Use candidates for the selected auto role to read its compact pool and revision. Role configuration is read-only through this tool. Use the owner management page to save or reset.',
+    description: 'Discover ready-to-use AgentDeck scene agents, their actual model options, native recovery and task records. Use general when no specialist fits. Availability includes the saved default route authorization for this Session; unknown is not approval. Read details only when needed; simple known-file work can use tools directly. Use candidates for the selected auto role to read its compact pool and revision. Role configuration is read-only through this tool. Use the owner management page to save or reset.',
     parameters: {
       action: { type: 'string', enum: ['list', 'get', 'models', 'preview', 'candidates', 'runs', 'save', 'reset'] },
       id: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' },
@@ -134,8 +135,8 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
         const code = error instanceof ChangeImpactError ? error.code
           : error instanceof ResultRevisionError ? 'AGENTDECK_RESULT_CHANGED'
           : error instanceof WriteOutcomeUnknownError ? 'AGENTDECK_WRITE_OUTCOME_UNKNOWN'
-          : 'AGENTDECK_OPERATION_FAILED';
-        return { ok: false, error: { code, message: messageOf(error), details: {} } };
+          : error instanceof SuggestionError ? error.code : 'AGENTDECK_OPERATION_FAILED';
+        return { ok: false, error: { code, message: messageOf(error), details: error instanceof SuggestionError ? error.details : {} } };
       }
     }), 'AgentDeck owner RPC');
   });

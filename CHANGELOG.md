@@ -2,6 +2,12 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.3.0 — DSH compatibility boundaries
+
+- Support DSH >=0.2.2-rc.1 through one artifact and public host-selected task, Session and model adapters. Keep native caller identity, authorization, cancellation and completion.
+- Normalize activation identities, root discovery and model labels/effort IDs at the Host boundary. Unknown model policies and terminal outcomes remain explicit instead of becoming authorization or failure claims.
+- Preserve immutable role snapshots across host upgrades. Gate CI and release on the same archive in isolated rc.1–rc.5 hosts and persisted old-to-new continuation.
+
 ## 0.2.12 — AgentDeck management and write recovery
 
 - Separate the role details, quick setup and run-history Session controls. Preserve proposals while inspecting roles, and require a fresh preview when the setup scope changes.

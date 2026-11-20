@@ -27,9 +27,8 @@ function apply(base: AgentDefinition | undefined, patch: Record<string, unknown>
   const result: Record<string, unknown> = base ? structuredClone(base) as unknown as Record<string, unknown> : {};
   const model = patch.model === undefined ? undefined : record(patch.model, 'model');
   if (model?.mode === 'auto' && base?.model.mode !== 'auto') {
-    // Candidate settings replace inherited role-wide reasoning and output only on a transition.
-    // Explicit caller settings still pass through below and are checked instead of discarded.
-    delete result.output;
+    // Candidate reasoning replaces inherited role-wide reasoning on a transition.
+    // Explicit caller settings still pass through below and are validated.
     result.reasoning = { mode: 'model-default' };
   }
   for (const [field, value] of Object.entries(patch)) {
@@ -41,11 +40,9 @@ function apply(base: AgentDefinition | undefined, patch: Record<string, unknown>
       // Appending without a base must not accidentally create a complete new definition.
       if (typeof first !== 'string') throw new Error('instructions.append requires inherited instructions or replace');
       result.instructions = operation.append ? `${first}\n\n${operation.append}` : first;
-    } else if (field === 'output' && value === null) {
-      delete result.output;
     } else if (['capabilities', 'skills', 'scripts'].includes(field)) {
       result[field] = mergeList(result[field], value);
-    } else if (['title', 'description', 'context', 'model', 'reasoning'].includes(field)) {
+    } else if (['title', 'description', 'model', 'reasoning'].includes(field)) {
       const part = record(value, field);
       const current = result[field] as Record<string, unknown> | undefined;
       // A mode transition starts a fresh pair; incompatible inherited provider/effort must not leak.
@@ -53,12 +50,8 @@ function apply(base: AgentDefinition | undefined, patch: Record<string, unknown>
       result[field] = { ...(reset ? {} : current), ...part };
     } else result[field] = value;
   }
-  // A v1 override can inherit v2 resources from a validated parent or lower layer.
-  const effectiveModel = result.model as AgentDefinition['model'] | undefined;
-  if (result.schemaVersion === 1 && base?.schemaVersion === 2 &&
-      (result.output !== undefined || effectiveModel?.mode === 'auto')) {
-    result.schemaVersion = 2;
-  }
+  // Active definitions always use the resource-free schema, including legacy sparse layers.
+  result.schemaVersion = 3;
   return validateAgent(result);
 }
 

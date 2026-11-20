@@ -1,0 +1,36 @@
+// One public dependency list for development linking and exact-host fixtures.
+export function hostPackages(manifest) {
+  return [...new Set([
+  ...Object.keys(manifest.peerDependencies ?? {}),
+  '@deepseek-ai/dsh-api-remotes',
+  '@deepseek-ai/cordis-plugin-loader',
+  '@deepseek-ai/dsh-subagent',
+  '@deepseek-ai/dsh-agent-loop',
+  '@deepseek-ai/dsh-working-directory',
+  '@deepseek-ai/dsh-fs-local',
+  '@deepseek-ai/dsh-session-persistence-jsonl',
+  '@deepseek-ai/dsh-subagent-spawn-in-process',
+  '@deepseek-ai/dsh-tool-executor-native',
+  '@deepseek-ai/dsh-client-connection',
+  '@deepseek-ai/dsh-host-webserver',
+  '@deepseek-ai/dsh-credentials',
+  '@deepseek-ai/dsh-subprocess-local',
+  '@deepseek-ai/dsh-token-meter',
+  '@deepseek-ai/dsh-compaction-basic',
+  '@deepseek-ai/dsh-skill',
+  '@deepseek-ai/dsh-tool-testkit',
+  '@deepseek-ai/dsh-agent-loop-testkit',
+  '@deepseek-ai/dsh-session-projection',
+  '@deepseek-ai/dsh-system-prompt',
+  '@deepseek-ai/dsh-commands',
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-storage-domain',
+  '@deepseek-ai/dsh-storage',
+  '@deepseek-ai/dsh-storage-json',
+  '@deepseek-ai/dsh-session-query',
+  '@deepseek-ai/dsh-tool-fs',
+  '@deepseek-ai/dsh-tool-fs-search',
+  '@deepseek-ai/dsh-web',
+  '@deepseek-ai/dsh-tool-web'
+])];
+}

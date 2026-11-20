@@ -6,7 +6,7 @@ export const CAPABILITIES = [
   'browser-observe', 'browser-interact', 'data-query', 'artifact-write',
 ] as const;
 const fields = ['schemaVersion', 'id', 'title', 'description', 'instructions', 'capabilities',
-  'skills', 'scripts', 'inputs', 'deliverables', 'model', 'reasoning', 'context', 'enabled', 'extends'];
+  'skills', 'scripts', 'inputs', 'deliverables', 'model', 'reasoning', 'enabled', 'extends'];
 const own = (value: object, key: string) => Object.hasOwn(value, key);
 
 export function record(value: unknown, path: string): Record<string, unknown> {
@@ -53,13 +53,13 @@ function localized(value: unknown, path: string): LocalizedText {
 }
 
 function candidates(value: unknown, path: string): ModelCandidate[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 3) {
-    throw new Error(`${path} must contain between 1 and 3 candidates`);
+  if (!Array.isArray(value) || value.length < 1) {
+    throw new Error(`${path} must contain at least one candidate`);
   }
   const parsed = Array.from(value, (value, index): ModelCandidate => {
     const pathItem = `${path}[${index}]`;
     const item = record(value, pathItem);
-    keys(item, ['id', 'purpose', 'provider', 'model', 'reasoning', 'maxTokens'], pathItem);
+    keys(item, ['id', 'purpose', 'provider', 'model', 'reasoning'], pathItem);
     const purpose = text(item.purpose, `${pathItem}.purpose`);
     if (purpose.length > 240) throw new Error(`${pathItem}.purpose must be at most 240 characters`);
     const reasoning = record(item.reasoning, `${pathItem}.reasoning`);
@@ -73,24 +73,37 @@ function candidates(value: unknown, path: string): ModelCandidate[] {
     return {
       id: identifier(item.id, `${pathItem}.id`), purpose,
       provider: text(item.provider, `${pathItem}.provider`), model: text(item.model, `${pathItem}.model`),
-      reasoning: parsedReasoning, maxTokens: tokens(item.maxTokens, `${pathItem}.maxTokens`, 1),
+      reasoning: parsedReasoning,
     };
   });
   if (new Set(parsed.map(item => item.id)).size !== parsed.length) throw new Error(`${path} contains duplicate candidate ids`);
   return parsed;
 }
 
-function output(value: unknown, path: string): { maxTokens: number } {
-  const item = record(value, path);
-  keys(item, ['maxTokens'], path);
-  return { maxTokens: tokens(item.maxTokens, `${path}.maxTokens`, 1) };
+/** Normalize retired resource fields in legacy sources without rewriting their text. */
+function activeDefinition(value: unknown, path: string): Record<string, unknown> {
+  const source = record(value, path);
+  if (![1, 2, 3].includes(source.schemaVersion as number)) throw new Error(`${path}.schemaVersion must be 1, 2 or 3`);
+  const item = structuredClone(source);
+  if (item.schemaVersion !== 3) {
+    delete item.output;
+    delete item.context;
+    if (item.model && typeof item.model === 'object' && !Array.isArray(item.model)) {
+      const model = item.model as Record<string, unknown>;
+      if (Array.isArray(model.candidates)) model.candidates = model.candidates.map(value => {
+        const candidate = { ...record(value, `${path}.model.candidate`) };
+        delete candidate.maxTokens;
+        return candidate;
+      });
+    }
+  }
+  return item;
 }
 
 export function validateAgent(value: unknown): AgentDefinition {
-  const item = record(value, 'agent');
-  if (item.schemaVersion !== 1 && item.schemaVersion !== 2) throw new Error('agent.schemaVersion must be 1 or 2');
-  const v2 = item.schemaVersion === 2;
-  keys(item, v2 ? [...fields, 'output'] : fields, 'agent');
+  const item = activeDefinition(value, 'agent');
+  const v2 = item.schemaVersion !== 1;
+  keys(item, fields, 'agent');
   const model = record(item.model, 'agent.model');
   keys(model, v2 ? ['mode', 'provider', 'model', 'candidates', 'defaultCandidate'] : ['mode', 'provider', 'model'], 'agent.model');
   if (model.mode !== 'inherit' && model.mode !== 'fixed' && !(v2 && model.mode === 'auto')) {
@@ -121,35 +134,26 @@ export function validateAgent(value: unknown): AgentDefinition {
   if (reasoning.mode === 'fixed') parsedReasoning.effort = text(reasoning.effort, 'agent.reasoning.effort');
   else if (own(reasoning, 'effort')) throw new Error('agent.reasoning.effort requires fixed mode');
   if (model.mode === 'auto' && reasoning.mode !== 'model-default') throw new Error('agent.reasoning must use model-default for auto mode');
-  if (model.mode === 'auto' && own(item, 'output')) throw new Error('agent.output cannot be specified for auto mode; candidates own maxTokens');
-  const parsedOutput = own(item, 'output') ? output(item.output, 'agent.output') : undefined;
-  const context = record(item.context, 'agent.context');
-  keys(context, ['targetTokens', 'elasticTokens'], 'agent.context');
-  const targetTokens = tokens(context.targetTokens, 'agent.context.targetTokens', 1);
-  const elasticTokens = tokens(context.elasticTokens, 'agent.context.elasticTokens', 1);
-  if (elasticTokens < targetTokens) throw new Error('agent.context.elasticTokens must be at least targetTokens');
   const capabilities = strings(item.capabilities, 'agent.capabilities');
   for (const capability of capabilities) {
     if (!(CAPABILITIES as readonly string[]).includes(capability)) throw new Error(`agent.capabilities: unknown capability ${capability}`);
   }
   if (typeof item.enabled !== 'boolean') throw new Error('agent.enabled must be a boolean');
   return {
-    schemaVersion: item.schemaVersion, id: identifier(item.id, 'agent.id'), title: localized(item.title, 'agent.title'),
+    schemaVersion: 3, id: identifier(item.id, 'agent.id'), title: localized(item.title, 'agent.title'),
     description: localized(item.description, 'agent.description'), instructions: text(item.instructions, 'agent.instructions'),
     capabilities, skills: strings(item.skills, 'agent.skills'), scripts: strings(item.scripts, 'agent.scripts'),
     inputs: strings(item.inputs, 'agent.inputs'), deliverables: strings(item.deliverables, 'agent.deliverables'),
-    model: parsedModel, reasoning: parsedReasoning, ...(parsedOutput ? { output: parsedOutput } : {}),
-    context: { targetTokens, elasticTokens }, enabled: item.enabled,
+    model: parsedModel, reasoning: parsedReasoning, enabled: item.enabled,
     ...(own(item, 'extends') ? { extends: identifier(item.extends, 'agent.extends') } : {}),
   };
 }
 
 /** Validate partial shapes before inheritance, including values that a later layer might replace. */
 export function validateOverride(value: unknown): Record<string, unknown> {
-  const item = record(value, 'override');
-  if (item.schemaVersion !== 1 && item.schemaVersion !== 2) throw new Error('override.schemaVersion must be 1 or 2');
-  const v2 = item.schemaVersion === 2;
-  keys(item, [...fields, 'displayName', ...(v2 ? ['output'] : [])], 'override');
+  const item = activeDefinition(value, 'override');
+  const v2 = item.schemaVersion !== 1;
+  keys(item, [...fields, 'displayName'], 'override');
   identifier(item.id, 'override.id');
   if (own(item, 'extends')) identifier(item.extends, 'override.extends');
   if (own(item, 'enabled') && typeof item.enabled !== 'boolean') throw new Error('override.enabled must be a boolean');
@@ -189,15 +193,14 @@ export function validateOverride(value: unknown): Record<string, unknown> {
     }
   }
   for (const field of ['inputs', 'deliverables']) if (own(item, field)) strings(item[field], `override.${field}`);
-  for (const field of ['model', 'reasoning', 'context']) {
+  for (const field of ['model', 'reasoning']) {
     if (!own(item, field)) continue;
     const part = record(item[field], `override.${field}`);
     keys(part, field === 'model' ? ['mode', 'provider', 'model', ...(v2 ? ['candidates', 'defaultCandidate'] : [])]
-      : field === 'reasoning' ? ['mode', 'effort'] : ['targetTokens', 'elasticTokens'], `override.${field}`);
+      : ['mode', 'effort'], `override.${field}`);
     if (!Object.keys(part).length) throw new Error(`override.${field} cannot be empty`);
     for (const [key, value] of Object.entries(part)) {
-      if (field === 'context') tokens(value, `override.${field}.${key}`, 1);
-      else if (field === 'model' && key === 'candidates') candidates(value, 'override.model.candidates');
+      if (field === 'model' && key === 'candidates') candidates(value, 'override.model.candidates');
       else if (field === 'model' && key === 'defaultCandidate') identifier(value, 'override.model.defaultCandidate');
       else text(value, `override.${field}.${key}`);
     }
@@ -219,13 +222,11 @@ export function validateOverride(value: unknown): Record<string, unknown> {
       if (v2 && own(part, 'mode') && part.mode !== 'fixed' && own(part, 'effort')) throw new Error('override.reasoning.effort requires fixed mode');
     }
   }
-  if (own(item, 'output') && item.output !== null) output(item.output, 'override.output');
   if (v2 && own(item, 'model') && record(item.model, 'override.model').mode === 'auto') {
     if (own(item, 'reasoning')) {
       const reasoning = record(item.reasoning, 'override.reasoning');
       if (reasoning.mode !== 'model-default' || own(reasoning, 'effort')) throw new Error('override.reasoning must use model-default for auto mode');
     }
-    if (own(item, 'output') && item.output !== null) throw new Error('override.output cannot be specified for auto mode; candidates own maxTokens');
   }
   return item;
 }

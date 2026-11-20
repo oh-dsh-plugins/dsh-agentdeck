@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { request as httpRequest } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -139,34 +139,73 @@ test('explicit public native RPC getter retains the consumer scope through Cordi
   } finally { await binding?.dispose(); await f.close(); }
 });
 
-test('AI setup without a Session goes through the Client, authenticated RPC and the native LLM stream', async () => {
-  const f = await fixture();
-  let controller;
+test('auto suggestion without a Session goes through the Client, owner RPC and native LLM stream', async () => {
+  const f = await fixture(); let controller;
   try {
-    const plugin = await clientPlugin();
-    controller = plugin.createController({ rpc: f.rpc });
+    const plugin = await clientPlugin(); controller = plugin.createController({ rpc: f.rpc });
     value(await controller.loadCatalog());
-    controller.openSetup();
-    value(await controller.loadSetupModels());
-    const generatorRoute = { provider: ROUTE.provider, model: ROUTE.model };
-    assert.ok(controller.setupModelOptionsState().items.some(provider => provider.id === ROUTE.provider));
-    controller.updateSetup({ proposalGenerator: generatorRoute });
-    value(await controller.loadSetupModels());
-    assert.ok(controller.setupModelOptionsState(ROUTE.provider).items.some(model => model.id === ROUTE.model));
-    assert.equal(f.h.adapter.requests.length, 0);
-    f.h.adapter.setupReply = JSON.stringify({ strategies: { reader: { mode: 'auto', defaultCandidate: 'local', candidates: [
-      { id: 'local', purpose: 'Read sources.', ...generatorRoute, reasoning: { mode: 'model-default' }, maxTokens: 1024 },
-    ] } } });
-    controller.updateSetup({ roleIds: ['reader'], includeBrowser: false });
-    const result = value(await controller.recommendSetup());
-    assert.equal(result.proposalSource, 'ai');
-    assert.equal(result.rows[0].after.model.defaultCandidate, 'local');
-    assert.ok(result.rows[0].warnings.some(warning => warning.code === 'setup.authorizationUnknown'));
+    controller.setModelMode('reader', 'auto');
+    controller.openSuggestion('reader');
+    const generator = { provider: ROUTE.provider, model: ROUTE.model };
+    value(await controller.loadSuggestionModelOptions());
+    controller.updateSuggestion('reader', { generator });
+    value(await controller.loadSuggestionModelOptions(ROUTE.provider));
+    assert.ok(controller.suggestionModelOptionsState(ROUTE.provider).items.some(model => model.id === ROUTE.model));
+    f.h.adapter.setupReply = JSON.stringify({ model: { mode: 'auto', defaultCandidate: 'local', candidates: [{ id: 'local', purpose: 'Read sources.', ...generator, reasoning: { mode: 'model-default' } }] }, reasoning: { mode: 'model-default' }, reason: 'Use this configured candidate for reading.' });
+    const result = value(await controller.generateSuggestion('reader'));
+    assert.equal(result.mode, 'auto');
+    assert.equal(result.model.defaultCandidate, 'local');
     assert.equal(f.h.adapter.requests.length, 1);
-    const [message] = f.h.adapter.requests[0].messages;
-    assert.equal(message.role, 'user');
-    assert.equal(message.content[0].type, 'text');
-    assert.deepEqual(JSON.parse(message.content[0].text).constraints.proposalGenerator, generatorRoute);
+    assert.equal(f.h.adapter.requests[0].provider, generator.provider);
+    assert.equal(f.h.adapter.requests[0].model, generator.model);
+    assert.equal(controller.adoptSuggestion('reader'), true);
+    assert.equal(controller.getSnapshot().drafts.reader.form.model.candidates[0].maxTokens, undefined);
+    assert.deepEqual(value(await f.rpc.call('/agentdeck', 'agentdeck.catalog', {})).overrides, []);
+    assert.equal(f.h.starts.length, 0);
+  } finally { controller?.dispose(); await f.close(); }
+});
+
+test('selected Session suggestion resolves a project role and keeps generation independent', async () => {
+  const plugin = await clientPlugin(); const f = await fixture(); let controller;
+  try {
+    const projectRoot = join(f.h.storageRoot, '.dsh', 'agentdeck');
+    await mkdir(projectRoot, { recursive: true });
+    await writeFile(join(projectRoot, 'project-reader.yml'), JSON.stringify({
+      schemaVersion: 3, id: 'project-reader', extends: 'reader',
+      model: { mode: 'fixed', provider: ROUTE.provider, model: ROUTE.model },
+      reasoning: { mode: 'model-default' },
+    }));
+    controller = plugin.createController({ rpc: f.rpc });
+    controller.setSession(f.h.parent.id);
+    const catalog = value(await controller.loadCatalog());
+    assert.ok(catalog.agents.some(role => role.id === 'project-reader'));
+    controller.openSuggestion('project-reader');
+    controller.updateSuggestion('project-reader', { generator: ROUTE });
+    f.h.adapter.setupReply = JSON.stringify({ model: { mode: 'fixed', ...ROUTE }, reasoning: { mode: 'model-default' }, reason: 'Keep the project role on its configured route.' });
+    const result = value(await controller.generateSuggestion('project-reader'));
+    assert.equal(result.id, 'project-reader');
+    assert.equal(result.model.provider, ROUTE.provider);
+    assert.equal(f.h.adapter.requests.length, 1);
+  } finally { controller?.dispose(); await f.close(); }
+});
+
+test('disabled roles can still generate an AI suggestion for later adoption', async () => {
+  const plugin = await clientPlugin(); const f = await fixture(); let controller;
+  try {
+    const id = 'disabled-reader';
+    value(await f.rpc.call('/agentdeck', 'agentdeck.save', {
+      id,
+      text: JSON.stringify({ schemaVersion: 3, id, extends: 'reader', enabled: false, model: { mode: 'fixed', ...ROUTE }, reasoning: { mode: 'model-default' } }),
+    }));
+    controller = plugin.createController({ rpc: f.rpc });
+    await controller.loadCatalog();
+    controller.openSuggestion(id);
+    controller.updateSuggestion(id, { generator: ROUTE });
+    f.h.adapter.setupReply = JSON.stringify({ model: { mode: 'fixed', ...ROUTE }, reasoning: { mode: 'model-default' }, reason: 'Keep the disabled role configuration ready for adoption.' });
+    const result = value(await controller.generateSuggestion(id));
+    assert.equal(result.id, id);
+    assert.equal(result.model.model, ROUTE.model);
+    assert.equal(f.h.adapter.requests.length, 1);
   } finally { controller?.dispose(); await f.close(); }
 });
 
@@ -262,71 +301,59 @@ test('actual Client controller reads and saves/resets isolated definitions over 
   } finally { controller?.dispose(); await f.close(); }
 });
 
-test('owner RPC rejects unreviewed or stale single and legacy batch changes with typed errors', async () => {
+test('owner RPC rejects unreviewed or stale single changes with typed errors', async () => {
   const f = await fixture();
   try {
     const call = (method, payload) => f.rpc.call('/agentdeck', 'agentdeck.' + method, payload);
-    const dependent = 'rpc-legacy-dependent';
-    value(await call('save', { id: dependent, text: JSON.stringify({ schemaVersion: 1, id: dependent, extends: 'reader' }) }));
-    const catalog = value(await call('catalog', {}));
-    const text = JSON.stringify({ schemaVersion: 1, id: 'reader', context: { targetTokens: 2000, elasticTokens: 4000 } });
-    const change = { id: 'reader', text };
-    const rows = [{ ...change, roleRevision: catalog.agents.find(role => role.id === 'reader').revision }];
+    const dependent = 'rpc-dependent';
+    value(await call('save', { id: dependent, text: JSON.stringify({ schemaVersion: 3, id: dependent, extends: 'reader' }) }));
+    const change = { id: 'reader', text: JSON.stringify({ schemaVersion: 3, id: 'reader', model: { mode: 'fixed', ...ROUTE } }) };
     const preview = value(await call('previewChange', change));
-    const batch = value(await call('previewSetup', { rows }));
-    assert.deepEqual(preview.impacts, batch.impacts);
     assert.deepEqual(preview.impacts.map(role => role.id), [dependent]);
-    for (const [method, payload, code] of [
-      ['save', change, 'PREVIEW_REQUIRED'],
-      ['save', { ...change, impactRevision: 'old', acceptedIndirectRoles: [dependent] }, 'PREVIEW_CHANGED'],
-      ['applySetup', { rows }, 'PREVIEW_REQUIRED'],
-      ['applySetup', { rows, impactRevision: batch.impactRevision }, 'CONSENT_REQUIRED'],
+    for (const [payload, code] of [
+      [change, 'PREVIEW_REQUIRED'],
+      [{ ...change, impactRevision: 'old', acceptedIndirectRoles: [dependent] }, 'PREVIEW_CHANGED'],
+      [{ ...change, impactRevision: preview.impactRevision }, 'CONSENT_REQUIRED'],
     ]) {
-      const refused = await call(method, payload);
+      const refused = await call('save', payload);
       assert.equal(refused.ok, false);
       assert.equal(refused.error.code, 'AGENTDECK_IMPACT_' + code);
     }
     assert.equal(value(await call('catalog', {})).overrides.length, 1);
-    const applied = value(await call('applySetup', { rows, impactRevision: batch.impactRevision, acceptedIndirectRoles: [dependent] }));
-    assert.equal(applied.status, 'completed');
+    value(await call('save', { ...change, impactRevision: preview.impactRevision, acceptedIndirectRoles: [dependent] }));
+    assert.equal(value(await call('catalog', {})).overrides.length, 2);
+    for (const method of ['recommend', 'previewSetup', 'applySetup']) assert.equal((await call(method, {})).ok, false);
   } finally { await f.close(); }
 });
 
 for (const derivedId of ['rpc-derived-reader', 'constructor'])
-test(`actual Client batch candidates and migration-impact consent roundtrip over native HTTP (${derivedId})`, async () => {
+test('actual Client per-role AI adoption and save roundtrip without a Session (' + derivedId + ')', async () => {
   const plugin = await clientPlugin(); const f = await fixture(); let controller;
   try {
     controller = plugin.createController({ rpc: f.rpc });
-    controller.setSession(f.h.parent.id);
-    value(await f.rpc.call('/agentdeck', 'agentdeck.save', { id: derivedId, text: `schemaVersion: 2\nid: ${derivedId}\nextends: reader\n`, sessionId: f.h.parent.id }));
+    value(await f.rpc.call('/agentdeck', 'agentdeck.save', { id: derivedId, text: JSON.stringify({ schemaVersion: 3, id: derivedId, extends: 'reader' }) }));
     value(await controller.loadCatalog());
-    controller.updateSetup({ roleIds: [derivedId], mode: 'fixed', fixed: { mode: 'fixed', provider: ROUTE.provider, model: ROUTE.model, reasoning: { mode: 'model-default' }, outputPolicy: { mode: 'preserve' } } });
-    value(await controller.recommendSetup());
-    assert.equal(controller.getSnapshot().setupProposal.rows[0].status, 'preserved');
-    assert.equal((await controller.applySetup()).ok, false);
+    controller.setModelMode(derivedId, 'fixed');
+    await controller.openSuggestion(derivedId);
+    controller.updateSuggestion(derivedId, { generator: { provider: ROUTE.provider, model: 'forbidden' } });
+    f.h.adapter.setupReply = JSON.stringify({ model: { mode: 'fixed', provider: ROUTE.provider, model: 'allowed' }, reasoning: { mode: 'model-default' }, reason: 'Use the chosen execution route for source reading.' });
+    value(await controller.generateSuggestion(derivedId));
     assert.equal(value(await f.rpc.call('/agentdeck', 'agentdeck.catalog', {})).overrides.length, 1);
-    const candidate = (id, maxTokens) => ({ id, purpose: 'Explicit fixture purpose ' + id, ...ROUTE, reasoning: { mode: 'model-default' }, maxTokens });
-    controller.updateSetup({ roleIds: ['reader'], mode: 'auto', auto: { mode: 'auto', candidates: [candidate('short', 2000), candidate('long', 6000)], defaultCandidate: 'short' } });
-    value(await controller.recommendSetup());
-    assert.equal(controller.getSnapshot().setupPreviewReady, true, JSON.stringify(controller.getSnapshot().errors));
-    const impacts = controller.getSnapshot().setupImpacts;
-    assert.ok(impacts.some(role => role.id === derivedId));
-    assert.equal((await controller.applySetup()).ok, false);
-    for (const role of impacts) controller.acceptSetupImpact(role.id, true);
-    value(await controller.applySetup());
-    const saved = controller.getSnapshot().catalog;
-    assert.equal(saved.overrides.length, 2);
-    assert.equal(saved.agents.find(role => role.id === 'reader').model.candidates[1].maxTokens, 6000);
-    assert.equal(saved.agents.find(role => role.id === derivedId).model.mode, 'auto');
-    controller.updateSetup({ scopePolicy: 'replace-selected', mode: 'fixed', fixed: { mode: 'fixed', provider: ROUTE.provider, model: ROUTE.model, reasoning: { mode: 'model-default' }, outputPolicy: { mode: 'preserve' } }, roleIds: ['reader'] });
-    value(await controller.recommendSetup()); assert.equal(controller.getSnapshot().setupProposal.rows[0].status, 'blocked');
-    controller.updateSetup({ resourceMigration: { reader: { mode: 'candidate', candidateId: 'long' } } });
-    value(await controller.recommendSetup());
-    for (const role of controller.getSnapshot().setupImpacts) controller.acceptSetupImpact(role.id, true);
-    value(await controller.applySetup());
-    const migrated = controller.getSnapshot().catalog.agents.find(role => role.id === 'reader');
-    assert.equal(migrated.model.mode, 'fixed'); assert.equal(migrated.output.maxTokens, 6000);
-    assert.equal(f.h.starts.length, 0); assert.equal(f.h.adapter.requests.length, 0);
+    assert.equal(controller.adoptSuggestion(derivedId), true);
+    assert.equal(controller.getSnapshot().drafts[derivedId].form.model.model, 'allowed');
+    assert.ok(controller.getSnapshot().drafts[derivedId].actions.some(action => action.path[0] === 'model'));
+    value(await controller.save(derivedId));
+    const saved = controller.getSnapshot().catalog.agents.find(role => role.id === derivedId);
+    assert.equal(saved.model.model, 'allowed');
+    assert.equal(saved.schemaVersion, 3);
+    assert.equal(saved.output, undefined);
+    assert.equal(saved.context, undefined);
+    assert.equal(f.h.adapter.requests.length, 1);
+    assert.equal(f.h.adapter.requests[0].model, 'forbidden');
+    assert.equal(f.h.starts.length, 0);
+    await f.reloadHost();
+    value(await controller.loadCatalog());
+    assert.equal(controller.getSnapshot().catalog.agents.find(role => role.id === derivedId).model.model, 'allowed');
   } finally { controller?.dispose(); await f.close(); }
 });
 

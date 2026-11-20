@@ -2,307 +2,226 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import test from 'node:test';
+import { loadBuiltinAgents } from '../lib/core/index.js';
 
-// State contracts plus actual SetupPanel function rendering with a tiny host-React
-// element recorder. This does not claim browser layout/accessibility verification.
-const source = (await readFile(new URL('../lib/client.js',import.meta.url),'utf8'))
- .replace('createController, definitionText,','SetupPanel, createController, definitionText,');
-const React = { Fragment:'fragment',createElement(type,props,...children){return typeof type==='function'?type({...props,children}):{type,props:props||{},children:children.flat(Infinity).filter(v=>v!==null&&v!==false&&v!==undefined)};} };
-function loadPlugin(timers = { setTimeout, clearTimeout }) {
- let registration;
- vm.runInNewContext(source,{window:{__ModuleLoader__:{load(value){registration=value;}}},AbortController,TextEncoder,...timers});
- return registration.factory(()=>React);
+// State and visible-content proof with a host React element recorder; browser QA is separate.
+const source = (await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'))
+  .replace('createController, definitionText,', 'SuggestionPanel, ModelTransfer, ErrorNotice, DiagnosticList, createController, definitionText,');
+const React = { Fragment: 'fragment', createElement(type, props, ...children) {
+  return typeof type === 'function' ? type({ ...props, children }) : { type, props: props || {}, children: children.flat(Infinity).filter(value => value !== null && value !== false && value !== undefined) };
+} };
+let registration;
+vm.runInNewContext(source, { window: { __ModuleLoader__: { load(value) { registration = value; } } }, AbortController, TextEncoder, setTimeout, clearTimeout });
+const plugin = registration.factory(() => React);
+const clone = value => JSON.parse(JSON.stringify(value));
+const ok = value => ({ ok: true, value });
+const generator = { provider: 'g', model: 'suggestion-model' };
+const base = { ...loadBuiltinAgents().find(role => role.id === 'reader'), revision: 'reader-r1', model: { mode: 'fixed', provider: '', model: '' }, reasoning: { mode: 'model-default' } };
+const fixed = { id: 'reader', revision: base.revision, mode: 'fixed', model: { mode: 'fixed', provider: 'p', model: 'execution' }, reasoning: { mode: 'fixed', effort: 'high' }, reason: 'Read the requested evidence.', generator };
+function harness(responder = () => ok(fixed), role = base) {
+  const calls = [];
+  const controller = plugin.createController({ rpc: { call(_channel, endpoint, payload, signal) {
+    const call = { endpoint, payload: clone(payload), signal }; calls.push(call);
+    if (endpoint === 'agentdeck.catalog') return ok({ agents: [clone(role)], overrides: [], diagnostics: [], sessions: [], runtime: {} });
+    if (endpoint === 'agentdeck.models') return ok({ providers: [{ id: 'g', name: 'Generator' }], models: [{ id: 'suggestion-model', name: 'Suggestion' }], diagnostics: [] });
+    return responder(call);
+  } } });
+  return { calls, controller };
 }
-const plugin=loadPlugin();
-const clone=value=>JSON.parse(JSON.stringify(value));
-const base={schemaVersion:1,id:'reader',title:{en:'Reader',zh:'阅读'},description:{en:'Read',zh:'读'},instructions:'Read.',enabled:true,capabilities:[],skills:[],scripts:[],inputs:[],deliverables:[],model:{mode:'inherit'},reasoning:{mode:'inherit-compatible'},context:{targetTokens:1000,elasticTokens:2000},revision:'reader-v1'};
-const resources=role=>({model:role.model,reasoning:role.reasoning,context:role.context});
-const catalog=(agents=[base],overrides=[])=>({agents,overrides,diagnostics:[],sessions:[],runtime:{}});
-const ok=value=>({ok:true,value});
-const deferred=()=>{let resolve;return {promise:new Promise(done=>resolve=done),resolve:value=>resolve(value)}};
-function harness(responder, client = plugin){const calls=[];return {calls,controller:client.createController({rpc:{call(channel,endpoint,payload){calls.push({endpoint,payload:clone(payload)});return responder(endpoint,payload);}}})};}
-function flatten(node){return !node||typeof node!=='object'?[]:[node,...(node.children||[]).flatMap(flatten)];}
-function render(controller){const state=controller.getSnapshot();return plugin.SetupPanel({state,controller,t:(key,params)=>{assert.ok(Object.hasOwn(plugin.dictionaries.en,key),'Missing visible locale: '+key);return plugin.dictionaries.en[key].replace(/\{(\w+)\}/g,(_,key)=>params?.[key]??key);},locale:{resolveText:value=>value.en}});}
+function deferred() { let resolve; return { promise: new Promise(done => { resolve = done; }), resolve: value => resolve(value) }; }
+const t = (key, values = {}) => {
+  assert.ok(Object.hasOwn(plugin.dictionaries.en, key), 'Missing visible locale ' + key);
+  return plugin.dictionaries.en[key].replace(/[{]([^}]+)[}]/g, (_, name) => values[name] ?? name);
+};
+function nodes(node) { return !node || typeof node !== 'object' ? [] : [node, ...(node.children || []).flatMap(nodes)]; }
+function text(node) { return !node || typeof node !== 'object' ? String(node ?? '') : (node.children || []).map(text).join(' '); }
+async function prepare(f) { await f.controller.loadCatalog(); f.controller.updateSuggestion('reader', { generator, requirements: 'Keep this role focused.', open: true }); }
 
-test('first open selects only clean unconfigured owned roles and never reseeds an emptied scope',async()=>{
- const agents=[base,{...base,id:'configured'},{...base,id:'disabled',enabled:false},{...base,id:'source',source:'/roles/source.yml'},{...base,id:'dirty'}];
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog(agents,[{id:'configured',text:'saved',revision:'r1'}]):{providers:[],models:[]}));
- try{await f.controller.loadCatalog();f.controller.edit('dirty','unsaved');f.controller.openSetup();
- assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.roleIds),['reader']);
- f.controller.updateSetup({roleIds:[]});f.controller.set({setupOpen:false});f.controller.openSetup();assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.roleIds),[]);
- f.controller.updateSetup({scopePolicy:'replace-selected'});assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.roleIds),[]);
- assert.equal(f.controller.setupProtection(agents[3]),'setupSourceProtected');render(f.controller);
- }finally{f.controller.dispose();}
+for (const mode of ['fixed', 'auto']) test('clicking the AI suggestion entry renders its controls in ' + mode + ' mode', async () => {
+  const role = { ...base, model: mode === 'auto' ? { mode, candidates: [], defaultCandidate: '' } : base.model };
+  const f = harness(undefined, role);
+  const render = () => {
+    const state = f.controller.getSnapshot();
+    return plugin.SuggestionPanel({ state, controller: f.controller, id: 'reader', draft: state.drafts.reader, t, disabled: false });
+  };
+  try {
+    await f.controller.loadCatalog();
+    nodes(render()).find(node => node.type === 'button' && text(node) === t('suggestOpen')).props.onClick();
+    assert.equal(f.controller.getSnapshot().suggestions.reader.open, true);
+    assert.equal(f.controller.getSnapshot().suggestions.reader.candidatePlan, 'auto');
+    const view = render();
+    assert.equal(view?.type, 'section', 'Opening must return the whole configuration panel before a result exists');
+    for (const name of ['provider', 'model', 'requirements']) {
+      assert.ok(nodes(view).some(node => node.props.id === 'agentdeck-reader-suggest-' + name), 'Missing visible ' + name + ' control');
+    }
+    assert.equal(nodes(view).some(node => node.props.id === 'agentdeck-reader-suggest-candidate-plan'), mode === 'auto');
+    assert.ok(nodes(view).some(node => node.type === 'button' && node.props.disabled && text(node) === t('suggestGenerate')));
+    assert.equal(f.calls.some(call => call.endpoint === 'agentdeck.suggest'), false);
+    nodes(view).find(node => node.type === 'button' && text(node) === t('close')).props.onClick();
+    assert.match(text(render()), new RegExp(t('suggestOpenTitle')));
+  } finally { f.controller.dispose(); }
 });
 
-test('AI setup suggests configured models and sends a manually entered model without a Session', async () => {
- const f = harness((endpoint, payload) => {
-  if (endpoint === 'agentdeck.catalog') return ok(catalog());
-  if (endpoint === 'agentdeck.recommend') return ok({ rows: [] });
-  return ok({ providers: [{ id: 'p', name: 'P' }, { id: 'q', name: 'Q' }], models: payload.provider === 'q' ? [{ id: 'listed', name: 'Listed' }] : [] });
- });
- try {
-  await f.controller.loadCatalog();
-  f.controller.openSetup();
-  await f.controller.loadSetupModels();
-  const nodes = () => flatten(render(f.controller));
-  const generate = () => nodes().find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate));
-  const provider = nodes().find(node => node.type === 'select' && node.children.some(child => child?.props?.value === 'q'));
-  assert.equal(generate().props.disabled, true);
-  assert.deepEqual(f.calls.filter(call => call.endpoint === 'agentdeck.models').map(call => call.payload), [{ view: 'setup-options' }]);
-  provider.props.onChange({ target: { value: 'q' } });
-  await f.controller.loadSetupModels();
-  assert.deepEqual(nodes().find(node => node.type === 'datalist').children.map(child => child.props.value), ['listed']);
-  const input = nodes().find(node => node.type === 'input' && node.props.list === 'agentdeck-setup-generator-models');
-  input.props.onChange({ target: { value: ' custom/model ' } });
-  assert.equal(generate().props.disabled, false);
-  await generate().props.onClick();
-  const payload = f.calls.find(call => call.endpoint === 'agentdeck.recommend').payload;
-  assert.deepEqual(payload.generatorRoute, { provider: 'q', model: 'custom/model' });
-  assert.equal(Object.hasOwn(payload, 'sessionId'), false);
-  assert.deepEqual(f.calls.filter(call => call.endpoint === 'agentdeck.models').map(call => call.payload), [{ view: 'setup-options' }, { view: 'setup-options', provider: 'q' }]);
- } finally { f.controller.dispose(); }
+test('suggestion generation keeps waiting and failure feedback visible without a result', async () => {
+  const pending = deferred();
+  const f = harness(() => pending.promise);
+  const render = () => {
+    const state = f.controller.getSnapshot();
+    return plugin.SuggestionPanel({ state, controller: f.controller, id: 'reader', draft: state.drafts.reader, t, disabled: false });
+  };
+  try {
+    await prepare(f);
+    const work = nodes(render()).find(node => node.type === 'button' && text(node) === t('suggestGenerate')).props.onClick();
+    assert.ok(nodes(render()).some(node => node.type === 'button' && node.props.disabled && text(node) === t('suggestGenerating')));
+    pending.resolve({ ok: false, error: { code: 'AGENTDECK_SUGGESTION_FAILED', message: 'HTTP 429 quota exceeded', details: { stage: 'generation', ...generator } } });
+    await work;
+    const view = render();
+    assert.ok(nodes(view).some(node => node.props.role === 'alert' && text(node).includes('HTTP 429 quota exceeded')));
+    assert.match(text(view), /suggestion-model/);
+    assert.ok(nodes(view).some(node => node.type === 'button' && !node.props.disabled && text(node) === t('suggestGenerate')));
+  } finally { f.controller.dispose(); }
 });
 
-test('inherit generation uses the AI proposal route and no-op rows never preview or save',async()=>{
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[{id:'reader',title:base.title,status:'unchanged',applicable:false,before:resources(base),after:resources(base),reasons:[],warnings:[]}]}:{providers:[],models:[]}));
- try{await f.controller.loadCatalog();f.controller.openSetup();f.controller.updateSetup({proposalGenerator:{provider:'p',model:'m'}});await f.controller.recommendSetup();
- const call=f.calls.find(value=>value.endpoint==='agentdeck.recommend');assert.equal(Object.hasOwn(call.payload,'strategy'),false);
- assert.deepEqual(call.payload.generatorRoute,{provider:'p',model:'m'});
- assert.equal(f.calls.some(call=>call.endpoint==='agentdeck.previewSetup'),false);assert.equal((await f.controller.applySetup()).ok,false);render(f.controller);
- }finally{f.controller.dispose();}
+test('fixed AI suggestion is Session-independent and only adoption changes the role draft', async () => {
+  const f = harness();
+  try {
+    await prepare(f);
+    const original = clone(f.controller.getSnapshot().drafts.reader.form);
+    assert.equal((await f.controller.generateSuggestion('reader')).ok, true);
+    const call = f.calls.find(value => value.endpoint === 'agentdeck.suggest');
+    assert.equal(Object.hasOwn(call.payload, 'sessionId'), false);
+    assert.deepEqual(call.payload.generator, generator);
+    assert.equal(call.payload.definition.model.mode, 'fixed');
+    assert.deepEqual(clone(f.controller.getSnapshot().drafts.reader.form), original);
+    assert.equal(f.calls.some(value => value.endpoint === 'agentdeck.save'), false);
+    assert.equal(f.controller.adoptSuggestion('reader'), true);
+    const draft = clone(f.controller.getSnapshot().drafts.reader.form);
+    assert.deepEqual(draft.model, fixed.model);
+    assert.deepEqual(draft.reasoning, fixed.reasoning);
+    for (const field of ['instructions', 'capabilities', 'skills', 'scripts', 'enabled']) assert.deepEqual(draft[field], original[field]);
+    assert.equal(draft.schemaVersion, 3);
+    assert.equal(Object.hasOwn(draft, 'context'), false);
+    assert.equal(Object.hasOwn(draft, 'output'), false);
+  } finally { f.controller.dispose(); }
 });
 
-test('setup uses its global provider directory independently of role metadata and Session policy', async () => {
- const f = harness((endpoint, payload) => {
-  if (endpoint === 'agentdeck.catalog') return ok(catalog());
-  if (payload.view === 'options') return ok({ providers: [{ id: 'p' }], models: [{ provider: 'p', id: 'parent' }] });
-  return ok({ providers: [{ id: 'p' }, { id: 'q' }], models: payload.provider === 'q' ? [{ id: 'outside-policy' }] : [] });
- });
- try {
-  f.controller.setSession('session-a');
-  await f.controller.loadCatalog();
-  await f.controller.loadModelMetadata('p', 'parent');
-  f.controller.openSetup();
-  await f.controller.loadSetupModels();
-  const route = { provider: 'q', model: 'outside-policy' };
-  f.controller.updateSetup({ proposalGenerator: route });
-  await f.controller.loadSetupModels();
-  f.controller.set({ setupProposal: { rows: [] }, setupPreviewReady: true });
-  f.controller.setSession('session-b');
-  await f.controller.loadCatalog();
-  await f.controller.loadSetupModels();
-  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), route);
-  assert.deepEqual(clone(f.controller.getSnapshot().setupProposal), { rows: [] });
-  assert.equal(f.controller.getSnapshot().setupPreviewReady, true);
-  assert.deepEqual(f.calls.filter(call => call.payload.view === 'setup-options').map(call => call.payload), [{ view: 'setup-options' }, { view: 'setup-options', provider: 'q' }]);
- } finally { f.controller.dispose(); }
+test('auto suggestion works with an unfinished seed and switching modes uses the default candidate', async () => {
+  const role = { ...base, model: { mode: 'auto', candidates: [], defaultCandidate: '' } };
+  const result = { ...fixed, mode: 'auto', reasoning: { mode: 'model-default' }, model: { mode: 'auto', candidates: [{ id: 'primary', purpose: 'Read evidence.', ...fixed.model, mode: undefined, reasoning: fixed.reasoning }], defaultCandidate: 'primary' } };
+  delete result.model.candidates[0].mode;
+  const f = harness(() => ok(result), role);
+  try {
+    await prepare(f); f.controller.updateSuggestion('reader', { candidatePlan: 'multiple' }); assert.equal((await f.controller.generateSuggestion('reader')).ok, true);
+    assert.equal(f.calls.find(value => value.endpoint === 'agentdeck.suggest').payload.candidatePlan, 'multiple');
+    assert.equal(f.controller.adoptSuggestion('reader'), true);
+    f.controller.setModelMode('reader', 'fixed');
+    assert.deepEqual(clone(f.controller.getSnapshot().drafts.reader.form.model), fixed.model);
+    assert.deepEqual(clone(f.controller.getSnapshot().drafts.reader.form.reasoning), fixed.reasoning);
+    f.controller.setModelMode('reader', 'inherit');
+    assert.deepEqual(clone(f.controller.getSnapshot().drafts.reader.form.model), { mode: 'inherit' });
+    assert.deepEqual(clone(f.controller.getSnapshot().drafts.reader.form.reasoning), { mode: 'inherit-compatible' });
+  } finally { f.controller.dispose(); }
 });
 
-test('a failed model list can be retried without disabling manual generation or clearing its review', async () => {
- let available = false;
- const route = { provider: 'p', model: 'manual' };
- const f = harness((endpoint, payload) => {
-  if (endpoint === 'agentdeck.catalog') return ok(catalog());
-  if (endpoint === 'agentdeck.recommend') return { ok: false, error: { code: 'generationFailed', message: 'Provider rejected p/manual' } };
-  return ok({ providers: [{ id: 'p' }], models: available ? [{ id: 'listed' }] : [], diagnostics: payload.provider && !available ? ['Model list unavailable'] : [] });
- });
- try {
-  await f.controller.loadCatalog();
-  f.controller.openSetup();
-  f.controller.updateSetup({ proposalGenerator: route });
-  await f.controller.loadSetupModels();
-  const nodes = () => flatten(render(f.controller));
-  const generate = nodes().find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.setupGenerate));
-  assert.equal(generate.props.disabled, false);
-  await generate.props.onClick();
-  assert.ok(nodes().some(node => node.children.includes('Provider rejected p/manual')));
-  const review = { rows: [] };
-  f.controller.set({ setupProposal: review, setupPreviewReady: true });
-  available = true;
-  const retry = nodes().find(node => node.type === 'button' && node.children.includes(plugin.dictionaries.en.retry));
-  await retry.props.onClick();
-  assert.deepEqual(nodes().find(node => node.type === 'datalist').children.map(child => child.props.value), ['listed']);
-  assert.equal(f.controller.getSnapshot().setupProposal, review);
-  assert.equal(f.controller.getSnapshot().setupPreviewReady, true);
-  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), route);
- } finally { f.controller.dispose(); }
+for (const action of ['edit', 'discard', 'requirements', 'mode', 'catalog']) test('late suggestion cannot overwrite a changed ' + action, async () => {
+  const pending = deferred(); const f = harness(() => pending.promise);
+  try {
+    await prepare(f); const work = f.controller.generateSuggestion('reader');
+    if (action === 'edit') f.controller.edit('reader', 'unsaved raw YAML');
+    if (action === 'discard') f.controller.discard('reader');
+    if (action === 'requirements') f.controller.updateSuggestion('reader', { requirements: 'New task requirement' });
+    if (action === 'mode') f.controller.setModelMode('reader', 'inherit');
+    if (action === 'catalog') { base.revision = 'reader-r2'; await f.controller.loadCatalog(); }
+    const before = clone(f.controller.getSnapshot().drafts.reader);
+    pending.resolve(ok(fixed)); await work;
+    assert.deepEqual(clone(f.controller.getSnapshot().drafts.reader), before);
+    assert.equal(f.controller.getSnapshot().suggestions.reader.result, undefined);
+  } finally { base.revision = 'reader-r1'; f.controller.dispose(); }
 });
 
-test('refresh reloads global model lists when the selected role has only a saved override', async () => {
- let model = 'first';
- const f = harness((endpoint, payload) => ok(endpoint === 'agentdeck.catalog'
-  ? catalog([], [{ id: 'broken', text: 'saved', revision: 'r1' }])
-  : { providers: [{ id: 'p' }], models: payload.provider ? [{ id: model }] : [] }));
- try {
-  await f.controller.loadCatalog();
-  f.controller.select('broken');
-  f.controller.openSetup();
-  f.controller.updateSetup({ proposalGenerator: { provider: 'p', model } });
-  await f.controller.loadSetupModels();
-  assert.deepEqual(clone(f.controller.setupModelOptionsState('p').items), [{ id: 'first' }]);
-  model = 'second';
-  await f.controller.refresh();
-  assert.deepEqual(clone(f.controller.setupModelOptionsState('p').items), [{ id: 'second' }]);
-  assert.deepEqual(clone(f.controller.getSnapshot().setupOptions.proposalGenerator), { provider: 'p', model: 'first' });
- } finally { f.controller.dispose(); }
+test('dirty raw YAML blocks adoption and marks an earlier result stale', async () => {
+  const f = harness();
+  try {
+    await prepare(f); await f.controller.generateSuggestion('reader');
+    f.controller.edit('reader', 'keep my raw text');
+    assert.equal(f.controller.suggestionCurrent('reader'), false);
+    assert.equal(f.controller.adoptSuggestion('reader'), false);
+    assert.equal(f.controller.getSnapshot().drafts.reader.text, 'keep my raw text');
+  } finally { f.controller.dispose(); }
 });
 
-test('fixed setup shows migration for each included auto role in a mixed batch', async()=>{
- const auto={mode:'auto',defaultCandidate:'old',candidates:[{id:'old',maxTokens:1000}]};
- const agents=[{...base,model:auto},{...base,id:'browser',title:{en:'Browser',zh:'Browser'},model:auto,capabilities:['browser-read']}];
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog(agents):{providers:[],models:[]}));
- try {
-  await f.controller.loadCatalog(); f.controller.openSetup(); f.controller.updateSetup({mode:'fixed'});
-  const migrations=()=>flatten(render(f.controller)).filter(node=>node.type==='select'&&node.children.some(child=>child?.props?.value==='@reset'));
-  assert.equal(migrations().length,2);
-  f.controller.updateSetup({browserSeparate:true}); assert.equal(migrations().length,2);
-  f.controller.updateSetup({includeBrowser:false}); assert.equal(migrations().length,1);
- } finally { f.controller.dispose(); }
+test('visible suggestion result has reason and settings; provider errors show their actual cause', async () => {
+  const f = harness();
+  try {
+    await prepare(f); await f.controller.generateSuggestion('reader');
+    const state = f.controller.getSnapshot();
+    const view = plugin.SuggestionPanel({ state, controller: f.controller, id: 'reader', draft: state.drafts.reader, t, disabled: false });
+    assert.match(text(view), /Read the requested evidence/);
+    assert.match(text(view), /p *[/] *execution/);
+    assert.ok(nodes(view).some(node => node.type === 'button' && !node.props.disabled && text(node).includes(plugin.dictionaries.en.suggestAdopt)));
+    const failure = plugin.ErrorNotice({ value: { code: 'AGENTDECK_SUGGESTION_FAILED', message: 'HTTP 429 quota exceeded', details: { stage: 'generation', ...generator, rawResponse: '{partial' } }, t });
+    assert.match(text(failure), /HTTP 429 quota exceeded/);
+    assert.match(text(failure), /suggestion-model/);
+    assert.match(text(plugin.DiagnosticList({ items: ['Provider list timed out'], t })), /Provider list timed out/);
+  } finally { f.controller.dispose(); }
 });
 
-test('AI proposal can outlive the ordinary read timeout but still has an aborting deadline',async()=>{
- const timers=[];
- const client=loadPlugin({setTimeout(fn,ms){const timer={fn,ms};timers.push(timer);return timer;},clearTimeout(timer){if(timer)timer.cleared=true;}});
- const pending=deferred();
- const f=harness(endpoint=>endpoint==='agentdeck.catalog'?ok(catalog()):pending.promise,client);
- try {
-  await f.controller.loadCatalog();
-  assert.equal(timers.at(-1).ms,15000);
-  f.controller.updateSetup({roleIds:['reader']});
-  const proposal=f.controller.recommendSetup();
-  const deadline=timers.at(-1);
-  assert.equal(deadline.ms,120000);
-  deadline.fn();
-  const result=await proposal;
-  assert.equal(result.error.code,'requestTimeout');
-  assert.equal(f.controller.getSnapshot().busy.recommend,false);
- } finally { f.controller.dispose(); }
+test('portable export panel selects saved roles and disables an empty download', async () => {
+  const f = harness();
+  const render = () => plugin.ModelTransfer({ state: f.controller.getSnapshot(), controller: f.controller, t, locale: { resolveText: value => value.en || value }, download() {} });
+  try {
+    await f.controller.loadCatalog(); f.controller.openModelExport();
+    assert.ok(text(render()).includes(t('transferExportHint')));
+    assert.equal(nodes(render()).find(node => node.type === 'button' && text(node) === t('transferDownload')).props.disabled, false);
+    nodes(render()).find(node => node.type === 'button' && text(node) === t('transferSelectNone')).props.onClick();
+    assert.equal(nodes(render()).find(node => node.type === 'button' && text(node) === t('transferDownload')).props.disabled, true);
+  } finally { f.controller.dispose(); }
 });
 
-test('auto setup asks AI without a prebuilt candidate pool',async()=>{
- const response={setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[{id:'reader',title:base.title,status:'unchanged',applicable:false,before:resources(base),after:resources(base),reasons:[],warnings:[]}]};
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?response:{providers:[],models:[]}));
- try{await f.controller.loadCatalog();f.controller.openSetup();f.controller.updateSetup({mode:'auto'});
-  const nodes=flatten(render(f.controller));
-  assert.ok(nodes.some(node=>node.type==='p'&&node.children.includes(plugin.dictionaries.en.setupAiProposalHint)));
-  await f.controller.recommendSetup();
-  const call=f.calls.find(value=>value.endpoint==='agentdeck.recommend');
-  assert.equal(Object.hasOwn(call.payload,'strategy'),false);
-  assert.equal(Object.hasOwn(call.payload,'browserStrategy'),false);
-  assert.deepEqual(call.payload.scopePolicy,'fill-unconfigured');
- }finally{f.controller.dispose();}
+test('portable import panel exposes candidate mapping and explicit default before skipping', async () => {
+  const f = harness();
+  const render = () => plugin.ModelTransfer({ state: f.controller.getSnapshot(), controller: f.controller, t, locale: { resolveText: value => value.en || value }, download() {} });
+  try {
+    await f.controller.loadCatalog();
+    const candidate = id => ({ id, purpose: 'Read evidence.', provider: 'g', model: 'suggestion-model', reasoning: { mode: 'model-default' } });
+    f.controller.importModels(JSON.stringify({ format: 'dsh-agentdeck-models', version: 1, roles: [{ id: 'reader', model: { mode: 'auto', candidates: [candidate('one'), candidate('two')], defaultCandidate: 'one' }, reasoning: { mode: 'model-default' } }] }));
+    for (let i = 0; i < 20 && f.controller.getSnapshot().transfer.checking; i++) await Promise.resolve();
+    const view = render();
+    assert.ok(text(view).includes(t('defaultCandidate')));
+    assert.ok(text(view).includes(t('defaultEffort')));
+    assert.ok(text(view).includes(t('transferRemoveDefaultHint')));
+    const skips = nodes(view).filter(node => node.type === 'button' && text(node) === t('transferRemoveCandidate'));
+    assert.equal(skips.length, 2);
+    assert.equal(skips[0].props.disabled, true);
+    assert.equal(skips[1].props.disabled, false);
+    skips[1].props.onClick();
+    assert.equal(f.controller.getSnapshot().transfer.rows[0].config.model.candidates.length, 1);
+    assert.equal(nodes(render()).find(node => node.type === 'button' && text(node) === t('transferAdopt')).props.disabled, true);
+  } finally { f.controller.dispose(); }
 });
 
-test('candidate inputs survive mode switches; deleted default requires an explicit new choice',async()=>{
- const f=harness(()=>ok(catalog()));try{await f.controller.loadCatalog();f.controller.openSetup();f.controller.updateSetup({mode:'auto'});
- f.controller.addSetupCandidate();const first=f.controller.getSnapshot().setupOptions.auto.candidates[0].id;
- f.controller.updateSetupCandidate(first,{purpose:'Bounded reading',provider:'p',model:'fast',maxTokens:1000});f.controller.addSetupCandidate();f.controller.addSetupCandidate();f.controller.addSetupCandidate();
- assert.equal(f.controller.getSnapshot().setupOptions.auto.candidates.length,3);
- f.controller.updateSetup({auto:{...f.controller.getSnapshot().setupOptions.auto,defaultCandidate:first}});f.controller.updateSetup({mode:'fixed'});f.controller.updateSetup({mode:'auto'});
- assert.equal(f.controller.getSnapshot().setupOptions.auto.candidates[0].purpose,'Bounded reading');f.controller.removeSetupCandidate(first);
- assert.equal(f.controller.getSnapshot().setupOptions.auto.defaultCandidate,'');assert.equal(plugin.formIssues({model:f.controller.getSnapshot().setupOptions.auto}).length>0,true);render(f.controller);
- }finally{f.controller.dispose();}
-});
-
-test('candidate caps use exact declared defaults only and stale metadata cannot overwrite a new cap',async()=>{
- const pending=deferred();const f=harness(endpoint=>endpoint==='agentdeck.models'?pending.promise:ok(catalog()));
- try{await f.controller.loadCatalog();f.controller.updateSetup({mode:'auto'});f.controller.addSetupCandidate();const id=f.controller.getSnapshot().setupOptions.auto.candidates[0].id;f.controller.updateSetupCandidate(id,{provider:'p'});
- const work=f.controller.setSetupCandidateModel(id,'m');assert.equal(f.controller.getSnapshot().setupOptions.auto.candidates[0].maxTokens,'');
- f.controller.updateSetupCandidate(id,{maxTokens:1234});pending.resolve(ok({providers:[],models:[{provider:'p',id:'m',metadataResolved:true,defaultMaxTokens:4000}]}));await work;
- assert.equal(f.controller.getSnapshot().setupOptions.auto.candidates[0].maxTokens,1234);
- f.controller.updateSetupCandidate(id,{maxTokens:''});await f.controller.setSetupCandidateModel(id,'m');assert.equal(f.controller.getSnapshot().setupOptions.auto.candidates[0].maxTokens,4000);
- }finally{f.controller.dispose();}
-});
-
-test('indirect consent is mandatory, subset-bound, and sent with the exact preview revision',async()=>{
- const row={id:'reader',title:base.title,status:'changed',applicable:true,proposedText:'new text',roleRevision:base.revision,before:resources(base),after:resources(base),reasons:[],warnings:[]};let preview=0;
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[row]}:endpoint==='agentdeck.previewSetup'?{resources:{reader:resources(base)},impactRevision:'impact-'+(++preview),impacts:[{id:'derived',title:{en:'Derived'},before:resources(base),after:resources(base),prefixes:[{afterId:'reader',resources:resources(base)}]}]}:endpoint==='agentdeck.applySetup'?{status:'completed',rows:[{id:'reader',status:'applied'}]}:{providers:[],models:[]}));
- try{await f.controller.loadCatalog();f.controller.openSetup();await f.controller.recommendSetup();assert.equal((await f.controller.applySetup()).ok,false);
- const nodes=flatten(render(f.controller));assert.ok(nodes.some(node=>node.type==='button'&&node.props.disabled&&node.children.some(value=>typeof value==='string'&&value===plugin.dictionaries.en.setupApply.replace('{count}','1'))));
- f.controller.acceptSetupImpact('derived',true);await f.controller.selectSetup('reader',false);assert.deepEqual(clone(f.controller.getSnapshot().setupAccepted),{});assert.equal((await f.controller.applySetup()).ok,false);
- await f.controller.selectSetup('reader',true);f.controller.acceptSetupImpact('derived',true);await f.controller.applySetup();
- const call=f.calls.find(call=>call.endpoint==='agentdeck.applySetup');assert.equal(call.payload.impactRevision,'impact-2');assert.deepEqual(call.payload.acceptedIndirectRoles,['derived']);assert.deepEqual(call.payload.setupPolicy,{scopePolicy:'fill-unconfigured'});
- }finally{f.controller.dispose();}
-});
-
-test('constructor impact requires explicit boolean consent in the UI and apply request',async()=>{
- const row={id:'reader',title:base.title,status:'changed',applicable:true,proposedText:'new text',roleRevision:base.revision,before:resources(base),after:resources(base),reasons:[],warnings:[]};
- const globalAfter = resources({ ...base, model: { mode: 'fixed', provider: 'p', model: 'global-model' } });
- const global = { before: resources(base), after: globalAfter, prefixes: [{ afterId: 'reader', resources: globalAfter }] };
- const impact = { id: 'constructor', title: { en: 'Constructor' }, before: resources(base), after: resources(base), prefixes: [], global };
- const globalOnly = { id: 'outside-project', title: { en: 'Outside project' }, scope: 'global', ...global };
- const projectAfter = resources({ ...base, model: { mode: 'fixed', provider: 'p', model: 'project-model' } });
- globalOnly.projects = [{ cwd: '/projects/another', ...global, after: projectAfter }];
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog():endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[row]}:endpoint==='agentdeck.previewSetup'?{resources:{reader:resources(base)},impactRevision:'constructor-impact',impacts:[impact, globalOnly]}:endpoint==='agentdeck.applySetup'?{status:'completed',rows:[{id:'reader',status:'applied'}]}:{providers:[],models:[]}));
- const assertConsent=accepted=>{
-  const nodes=flatten(render(f.controller));
-  const labels = nodes.filter(node => node.type === 'label' && node.children.includes(plugin.dictionaries.en.setupAcceptImpact));
-  assert.equal(labels.length, 2);
-  assert.equal(nodes.filter(node => node.children.includes(plugin.dictionaries.en.setupImpactGlobal)).length, 2);
-  assert.equal(nodes.filter(node => node.children.includes(plugin.dictionaries.en.setupImpactProject)).length, 1);
-  assert.ok(nodes.some(node => node.children.some(child => typeof child === 'string' && child.startsWith('p/global-model'))));
-  assert.ok(nodes.some(node => node.children.includes('Project configuration · /projects/another')));
-  assert.ok(nodes.some(node => node.children.some(child => typeof child === 'string' && child.startsWith('p/project-model'))));
-  const checkbox=flatten(labels[0]).find(node=>node.type==='input'&&node.props.type==='checkbox');
-  assert.ok(checkbox);assert.equal(checkbox.props.checked,accepted);assert.equal(checkbox.props.disabled,false);
-  const apply=nodes.find(node=>node.type==='button'&&node.children.includes(plugin.dictionaries.en.setupApply.replace('{count}','1')));
-  assert.ok(apply);assert.equal(Boolean(apply.props.disabled),!accepted);
- };
- try{await f.controller.loadCatalog();f.controller.openSetup();await f.controller.recommendSetup();
- f.controller.acceptSetupImpact('outside-project', true);
- assert.equal(Object.hasOwn(f.controller.getSnapshot().setupAccepted,'constructor'),false);assertConsent(false);
- assert.equal((await f.controller.applySetup()).ok,false);assert.equal(f.calls.some(call=>call.endpoint==='agentdeck.applySetup'),false);
- f.controller.acceptSetupImpact('constructor',1);assertConsent(false);assert.equal((await f.controller.applySetup()).ok,false);
- f.controller.acceptSetupImpact('constructor',true);assertConsent(true);
- f.controller.acceptSetupImpact('constructor',false);assertConsent(false);assert.equal((await f.controller.applySetup()).ok,false);
- assert.equal(f.calls.some(call=>call.endpoint==='agentdeck.applySetup'),false);
- f.controller.acceptSetupImpact('constructor',true);assertConsent(true);assert.equal((await f.controller.applySetup()).ok,true);
- const call=f.calls.find(call=>call.endpoint==='agentdeck.applySetup');assert.deepEqual(call.payload.acceptedIndirectRoles,['constructor','outside-project']);assert.equal(call.payload.impactRevision,'constructor-impact');
- }finally{f.controller.dispose();}
-});
-
-test('inherit mode uses the AI form and preserves fixed inputs',async()=>{
- const f=harness(endpoint=>ok(endpoint==='agentdeck.catalog'?catalog([{...base,output:{maxTokens:2000}}]):endpoint==='agentdeck.recommend'?{setupPolicy:{scopePolicy:'fill-unconfigured'},rows:[]}:{providers:[],models:[]}));
- try{await f.controller.loadCatalog();f.controller.openSetup();
- assert.equal(flatten(render(f.controller)).some(node=>node.type==='details'&&node.props.open===true),false);
- f.controller.updateSetup({inheritOutputPolicy:{mode:'clear'},proposalGenerator:{provider:'p',model:'m'}});f.controller.updateSetup({mode:'fixed'});f.controller.updateSetup({mode:'inherit'});await f.controller.recommendSetup();
- const call=f.calls.find(value=>value.endpoint==='agentdeck.recommend');assert.equal(Object.hasOwn(call.payload,'strategy'),false);
- assert.deepEqual(call.payload.generatorRoute,{provider:'p',model:'m'});
- assert.equal(f.controller.getSnapshot().setupOptions.fixed.outputPolicy.mode,'preserve');
- }finally{f.controller.dispose();}
-});
-
-test('failed setup reconciliation cannot publish a receipt into a newly selected Session', async () => {
- const pending = deferred();
- const started = deferred();
- const f = harness(endpoint => {
-    if (endpoint === 'agentdeck.applySetup') throw new Error('write response lost');
-    return endpoint === 'agentdeck.catalog' ? (started.resolve(), pending.promise) : ok(catalog());
-  });
- try {
-  f.controller.set({ setupSessionId: 'old', setupPreviewReady: true, setupSelected: { reader: true }, setupProposal: { rows: [{ id: 'reader', applicable: true, proposedText: 'text', roleRevision: 'reader-v1' }] } });
-  const write = f.controller.applySetup();
-  await started.promise;
-  // Resolve the old catalog with a failure synchronously during its error publication.
-  const unsub = f.controller.subscribe(() => {
-   if (f.controller.getSnapshot().errors.setupCatalog) {
-    unsub();
-    f.controller.set({ setupSessionId: 'new' });
-   }
-  });
-  pending.resolve({ ok: false, error: { message: 'readback failed' } });
-  await write;
-  unsub();
-  assert.equal(f.controller.getSnapshot().setupSessionId, 'new');
-  assert.equal(f.controller.getSnapshot().setupResult, null);
- } finally { f.controller.dispose(); }
-});
-
-test('setup scope and draft changes invalidate consent',async()=>{
- const f=harness(()=>ok(catalog()));try{await f.controller.loadCatalog();
- for(const change of [()=>f.controller.updateSetup({includeBrowser:false}),()=>f.controller.edit('reader','typed draft'),()=>f.controller.setSetupSession('other')]){
- f.controller.set({setupProposal:{rows:[]},setupImpactRevision:'old',setupImpacts:[{id:'derived'}],setupAccepted:{derived:true},setupPreviewReady:true});change();assert.equal(f.controller.getSnapshot().setupStale,true);assert.ok(f.controller.getSnapshot().setupProposal);assert.deepEqual(clone(f.controller.getSnapshot().setupAccepted),{});assert.equal(f.controller.getSnapshot().setupImpactRevision,null);
- }
- }finally{f.controller.dispose();}
+test('portable import renders structured provider names as text options', async () => {
+  const f = harness();
+  const render = () => plugin.ModelTransfer({ state: f.controller.getSnapshot(), controller: f.controller, t, locale: { resolveText: value => value.en || value }, download() {} });
+  try {
+    await f.controller.loadCatalog();
+    f.controller.set({
+      providers: [{ id: 'g', name: { id: 'g', name: 'Generator' } }], providersLoaded: true,
+      modelOptions: { g: [{ id: 'suggestion-model', name: { id: 'suggestion-model', name: 'Suggestion' } }] },
+      modelMetadata: { ['modelMetadata:' + JSON.stringify(['g', 'suggestion-model'])]: { models: [{ provider: 'g', id: 'suggestion-model', metadataResolved: true, efforts: [{ id: 'high', name: { id: 'high', name: 'High' } }] }] } },
+    });
+    const candidate = { id: 'one', purpose: 'Read evidence.', provider: 'g', model: 'suggestion-model', reasoning: { mode: 'model-default' } };
+    f.controller.importModels(JSON.stringify({ format: 'dsh-agentdeck-models', version: 1, roles: [{ id: 'reader', model: { mode: 'auto', candidates: [candidate], defaultCandidate: 'one' }, reasoning: { mode: 'model-default' } }] }));
+    for (let i = 0; i < 20 && f.controller.getSnapshot().transfer.checking; i++) await Promise.resolve();
+    const options = nodes(render()).filter(node => node.type === 'option');
+    assert.ok(options.length > 0);
+    assert.ok(options.every(node => node.children.every(child => typeof child === 'string')));
+    const high = options.find(node => node.props.value === JSON.stringify({ mode: 'fixed', effort: 'high' }));
+    assert.ok(high, 'A structured effort option must submit its native ID, not its display label');
+    const effort = nodes(render()).find(node => node.type === 'select' && node.props.value === JSON.stringify({ mode: 'model-default' }));
+    effort.props.onChange({ target: { value: high.props.value } });
+    const row = f.controller.getSnapshot().transfer.rows[0];
+    assert.deepEqual(clone(row.config.model.candidates[0].reasoning), { mode: 'fixed', effort: 'high' });
+    assert.equal(f.controller.transferIssue(row), '');
+  } finally { f.controller.dispose(); }
 });

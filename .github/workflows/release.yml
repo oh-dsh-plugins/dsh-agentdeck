@@ -22,7 +22,7 @@ jobs:
     name: Test and build the tagged source
     if: github.repository == 'oh-dsh-plugins/dsh-agentdeck'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -75,6 +75,8 @@ jobs:
         run: npm run check:pack
       - name: Pack the tested build
         run: mkdir -p artifacts && npm pack --ignore-scripts --pack-destination artifacts
+      - name: Verify the same archive on five DSH hosts and an upgrade
+        run: npm run test:compatibility
       - name: Preserve the tested npm archive
         uses: actions/upload-artifact@v7.0.2
         with:

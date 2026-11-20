@@ -6,5 +6,8 @@ const dictionaries = Object.fromEntries(await Promise.all(['en', 'zh'].map(async
 const code = await readFile(source, 'utf8');
 const marker = '/* AGENTDECK_LOCALES */ null';
 if (code.split(marker).length !== 2) throw new Error('Client locale marker must occur exactly once.');
-await writeFile(output, code.replace(marker, JSON.stringify(dictionaries)), 'utf8');
+const transferMarker = '/* AGENTDECK_TRANSFER */ null';
+if (code.split(transferMarker).length !== 2) throw new Error('Client transfer marker must occur exactly once.');
+const transfer = await readFile(new URL('../src/client/transfer.js', import.meta.url), 'utf8');
+await writeFile(output, code.replace(marker, JSON.stringify(dictionaries)).replace(transferMarker, () => transfer.trim()), 'utf8');
 console.log('Built native Client module: lib/client.js');

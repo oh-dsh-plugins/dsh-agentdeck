@@ -4,7 +4,7 @@ Bug reports, focused fixes and documentation improvements are welcome. Open an i
 
 ## Development
 
-Use Node.js >=24.9.0 and an installed DSH 0.2.2-rc.3 CLI on a POSIX development environment:
+Use Node.js >=24.9.0 and an installed DSH >=0.2.2-rc.1 CLI on a POSIX development environment:
 
 ```sh
 npm ci --ignore-scripts

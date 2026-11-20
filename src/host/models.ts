@@ -1,5 +1,7 @@
 import type { HostContext, RuntimeAgent, JsonObject, EffectiveSelection } from './types.js';
-import { messageOf } from './types.js';
+import { messageOf, requiredString } from './types.js';
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import { record, type ModelView, type EffortView, type ModelQueries, type RoutePolicy, type ModelRoute } from './contracts.js';
 
 export function currentSelection(agent?: RuntimeAgent): JsonObject | undefined {
   const current = agent?.model?.current?.();
@@ -15,29 +17,36 @@ export function delegationSelection(agent?: RuntimeAgent): JsonObject | undefine
   return agent.options.provider && agent.options.model ? { ...agent.options } : undefined;
 }
 
-export async function sessionRoutes(ctx: HostContext, agent?: RuntimeAgent, signal?: AbortSignal): Promise<{ provider: string; model: string }[] | undefined> {
+export type { RoutePolicy } from './contracts.js';
+const unknownPolicy = (): Exclude<RoutePolicy, ModelRoute[] | undefined> => ({ kind: 'unknown', message: 'Native Session model policy is unavailable or unsupported. Authorization remains unknown; native delegation will not be bypassed.' });
+function policyUnknown(policy: RoutePolicy): policy is Exclude<RoutePolicy, ModelRoute[] | undefined> { return policy !== undefined && !Array.isArray(policy); }
+function policyName(agent: RuntimeAgent | undefined, policy: RoutePolicy): string { return !agent ? 'not-selected' : policyUnknown(policy) ? 'unknown' : policy ? 'session' : 'parent-only'; }
+
+export async function sessionRoutes(ctx: HostContext, agent?: RuntimeAgent, signal?: AbortSignal): Promise<RoutePolicy> {
   if (!agent) return undefined;
-  const query = ctx.get('sessionQuery') as any;
-  if (!query) return undefined;
-  const observation = await query.observeSession(agent.id, { projectionMode: 'none', signal });
-  try {
-    const events = observation.events;
-    for (let index = 0; index < events.length; index++) {
-      const event = events[index];
-      if (event.type === 'subagent/model-selection-policy') return event.data.allowedModels;
-    }
-    return undefined;
-  } finally { observation[Symbol.dispose](); }
+  const query = ctx.get('sessionQuery');
+  if (!query || typeof query.observeSession !== 'function') return unknownPolicy();
+  using observation = await query.observeSession(agent.id, { projectionMode: 'none', signal });
+  signal?.throwIfAborted();
+  if (!Array.isArray(observation.events)) return unknownPolicy();
+  for (const event of observation.events) {
+    if (event.type !== 'subagent/model-selection-policy') continue;
+    const routes: unknown = event.data?.allowedModels;
+    if (!Array.isArray(routes) || !routes.every(route => record(route) && typeof route.provider === 'string' && !!route.provider.trim() && typeof route.model === 'string' && !!route.model.trim())) return unknownPolicy();
+    return routes.map(route => ({ provider: route.provider, model: route.model }));
+  }
+  return undefined;
 }
 
 export function explicitModelRoutes(parent: JsonObject | undefined, routes: Awaited<ReturnType<typeof sessionRoutes>>) {
-  return routes ?? (parent?.provider && parent.model ? [{ provider: parent.provider, model: parent.model }] : []);
+  return policyUnknown(routes) ? [] : routes ?? (parent?.provider && parent.model ? [{ provider: parent.provider, model: parent.model }] : []);
 }
 
 /** Match native implicit inheritance and explicit route policy without discovering models. */
 export function routeAuthorization(configured: EffectiveSelection | undefined, parent: JsonObject | undefined,
-  routes: { provider: string; model: string }[] | undefined, hasSession: boolean, explicit: boolean): JsonObject {
+  routes: RoutePolicy, hasSession: boolean, explicit: boolean): JsonObject {
   if (!hasSession || !configured || !parent) return { status: 'unknown' };
+  if (policyUnknown(routes)) return { status: 'unknown', code: 'AGENTDECK_MODEL_POLICY_UNKNOWN', policy: 'unknown', message: routes.message };
   const same = parent.provider === configured.provider && parent.model === configured.model;
   const allowedModels = explicitModelRoutes(parent, routes);
   if ((!explicit && same) || allowedModels.some(route => route.provider === configured.provider && route.model === configured.model)) return { status: 'authorized' };
@@ -48,20 +57,58 @@ export function routeAuthorization(configured: EffectiveSelection | undefined, p
 }
 
 export class ModelAuthorizationError extends Error {
-  readonly code = 'AGENTDECK_MODEL_NOT_AUTHORIZED';
-  constructor(readonly details: JsonObject) { super(details.message); }
+  readonly code: string;
+  constructor(readonly details: JsonObject) {
+    super(details.message);
+    this.code = typeof details.code === 'string' ? details.code : 'AGENTDECK_MODEL_NOT_AUTHORIZED';
+  }
 }
 
 export function supportsTextInput(model: JsonObject): boolean {
   return !Array.isArray(model.inputModalities) || model.inputModalities.includes('text');
 }
 
-export function modelView(info: JsonObject, authorized: boolean | null): JsonObject {
-  return { provider: info.provider, id: info.id, name: info.name ?? info.id, authorized, metadataResolved: true, ...(info.context?.contextWindow ? { contextWindow: info.context.contextWindow } : {}), ...(info.defaultMaxTokens ? { defaultMaxTokens: info.defaultMaxTokens } : {}), efforts: info.reasoning?.efforts ?? [], ...(info.reasoning?.defaultEffort ? { defaultEffort: info.reasoning.defaultEffort } : {}), ...(info.inputModalities ? { inputModalities: info.inputModalities } : {}) };
+export function displayName(value: unknown, fallback: string): string {
+  if (typeof value === 'string') return value;
+  if (record(value)) for (const key of ['label', 'name', 'id']) if (typeof value[key] === 'string') return value[key];
+  return fallback;
+}
+export function modelView(info: JsonObject, authorized: boolean | null): ModelView {
+  const provider = requiredString(info.provider, 'model provider');
+  const id = requiredString(info.id, 'model id');
+  const label = displayName(info.name, id);
+  const source: unknown = info.reasoning?.efforts ?? [];
+  if (!Array.isArray(source)) throw new Error('Native reasoning efforts have an unsupported structure.');
+  const efforts: EffortView[] = source.map(value => {
+    const effortId = requiredString(typeof value === 'string' ? value : value?.id, 'reasoning effort id');
+    const effortLabel = displayName(value?.label ?? value?.name, effortId);
+    return { id: effortId, label: effortLabel, name: effortLabel, ...(typeof value?.description === 'string' ? { description: value.description } : {}) };
+  });
+  const positive = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0;
+  return { provider, id, name: label, label, authorized, metadataResolved: true, efforts,
+    ...(positive(info.context?.contextWindow) ? { contextWindow: info.context.contextWindow } : {}),
+    ...(positive(info.defaultMaxTokens) ? { defaultMaxTokens: info.defaultMaxTokens } : {}),
+    ...(typeof info.reasoning?.defaultEffort === 'string' ? { defaultEffort: info.reasoning.defaultEffort } : {}),
+    ...(Array.isArray(info.inputModalities) ? { inputModalities: info.inputModalities.filter((value: unknown) => typeof value === 'string') } : {}) };
 }
 
-type ModelRoute = { provider: string; model: string };
-type ModelEntry = { provider: string; id: string; name?: string };
+/** Context-scoped query adapter; metadata never grants Session authorization. */
+export function createModelQueries(ctx: HostContext): ModelQueries {
+  return {
+    selection: currentSelection,
+    inheritance: delegationSelection,
+    policy: (agent, signal) => sessionRoutes(ctx, agent, signal),
+    resolve: async (configured, signal, parent) => {
+      const { reasoningEffort, ...config } = configured;
+      return ctx.llm.resolveCallConfig({ ...(parent?.maxTokens === undefined ? {} : { maxTokens: parent.maxTokens }), ...config,
+        ...(reasoningEffort ? { reasoningEffort: ReasoningEffortId(reasoningEffort) } : {}) }, signal);
+    },
+    info: async (provider, model, signal) => modelView(await ctx.llm.resolveModelInfo(provider, model, signal), null),
+    directory: (agent, query, signal, optionsOnly) => modelDirectory(ctx, agent, query, signal, optionsOnly),
+  };
+}
+
+type ModelEntry = { provider: string; id: string; name?: unknown };
 type ModelAuthorization = (provider: string, model: string) => boolean | null;
 
 const METADATA_CONCURRENCY = 8;
@@ -75,7 +122,7 @@ async function resolveModelRows(ctx: HostContext, entries: ModelEntry[], allowed
   signal?: AbortSignal, optionsOnly = false): Promise<JsonObject[]> {
   signal?.throwIfAborted();
   const rows: JsonObject[] = entries.map(({ provider, id, name }) => ({
-    provider, id, name: name ?? id, authorized: allowed(provider, id), metadataResolved: false,
+    provider, id, name: displayName(name, id), label: displayName(name, id), authorized: allowed(provider, id), metadataResolved: false,
   }));
   if (optionsOnly || !entries.length) return rows;
   const llm = ctx.get('llm');
@@ -128,28 +175,28 @@ export async function modelDeclarations(ctx: HostContext, entries: ModelRoute[],
   signal?: AbortSignal, routeSnapshot?: { routes: Awaited<ReturnType<typeof sessionRoutes>> }): Promise<JsonObject[]> {
   if (!entries.length) return [];
   const policy = routeSnapshot ? routeSnapshot.routes : await sessionRoutes(ctx, agent, signal);
-  const allowed = modelPermissions(agent, explicitModelRoutes(delegationSelection(agent), policy));
+  const allowed = modelPermissions(agent, explicitModelRoutes(delegationSelection(agent), policy), policyUnknown(policy));
   const unique = new Map(entries.map(route => [JSON.stringify([route.provider, route.model]), { provider: route.provider, id: route.model }]));
   return resolveModelRows(ctx, [...unique.values()], allowed, signal);
 }
 
-function modelPermissions(agent: RuntimeAgent | undefined, routes: ModelRoute[]): ModelAuthorization {
+function modelPermissions(agent: RuntimeAgent | undefined, routes: ModelRoute[], unknown = false): ModelAuthorization {
   const allowed = new Set(routes.map(route => JSON.stringify([route.provider, route.model])));
-  return (provider, model) => agent ? allowed.has(JSON.stringify([provider, model])) : null;
+  return (provider, model) => agent && !unknown ? allowed.has(JSON.stringify([provider, model])) : null;
 }
 
 export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, query?: { provider: string; model?: string }, signal?: AbortSignal, optionsOnly = false, authorizedRoutesOnly = false, routeSnapshot?: { routes: Awaited<ReturnType<typeof sessionRoutes>> }): Promise<JsonObject> {
   const llm = ctx.get('llm') as any;
   if (!llm) return { providers: [], models: [], policy: agent ? 'parent-only' : 'not-selected', diagnostics: ['Native llm service is unavailable.'] };
-  const providers = llm.listProviders();
+  const providers = llm.listProviders().map((provider: JsonObject) => ({ id: provider.id, name: displayName(provider.name, provider.id), label: displayName(provider.name, provider.id) }));
   const selection = currentSelection(agent);
   const inheritance = delegationSelection(agent);
   const routes = routeSnapshot ? routeSnapshot.routes : await sessionRoutes(ctx, agent, signal);
   signal?.throwIfAborted();
   const explicitRoutes = explicitModelRoutes(inheritance, routes);
-  if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), explicitRoutes, policy: !agent ? 'not-selected' : routes ? 'session' : 'parent-only', diagnostics: [] };
-  const allowed = modelPermissions(agent, explicitRoutes);
-  const diagnostics: string[] = [];
+  if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), explicitRoutes, policy: policyName(agent, routes), diagnostics: [] };
+  const allowed = modelPermissions(agent, explicitRoutes, policyUnknown(routes));
+  const diagnostics: string[] = policyUnknown(routes) ? [routes.message] : [];
   const rows = new Map<string, any>();
   const exact = query?.model ? { provider: query.provider, model: query.model } : undefined;
   if (!exact && !authorizedRoutesOnly) {
@@ -192,11 +239,11 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
   }
   const routeRows = authorizedRoutesOnly
     ? explicitRoutes
-    : [...(routes ?? []), ...(selection ? [{ provider: selection.provider, model: selection.model }] : []), ...(inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : [])];
+    : [...(Array.isArray(routes) ? routes : []), ...(selection ? [{ provider: selection.provider, model: selection.model }] : []), ...(inheritance ? [{ provider: inheritance.provider, model: inheritance.model }] : [])];
   for (const route of exact ? [exact] : routeRows.filter(route => !query || route.provider === query.provider)) {
     const key = `${route.provider}\0${route.model}`;
     if (!rows.has(key)) rows.set(key, { provider: route.provider, id: route.model, name: route.model });
   }
   const models = await resolveModelRows(ctx, [...rows.values()], allowed, signal, optionsOnly && !exact);
-  return { providers, models, ...(selection ? { selection } : {}), policy: !agent ? 'not-selected' : routes ? 'session' : 'parent-only', diagnostics };
+  return { providers, models, ...(selection ? { selection } : {}), policy: policyName(agent, routes), diagnostics };
 }

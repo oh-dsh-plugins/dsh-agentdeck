@@ -95,7 +95,7 @@ test('candidate route selection resets only that route effort, keeps caps/defaul
     form = controller.getSnapshot().drafts.general.form;
     assert.equal(form.model.candidates[0].model, 'chosen');
     assert.equal(controller.modelMetadataState('b', 'chosen').model.metadataResolved, true);
-    assert.equal(form.schemaVersion, 2);
+    assert.equal(form.schemaVersion, 3);
     controller.edit('general', 'hand-written YAML');
     const before = calls.length;
     await controller.setCandidateProvider('general', 0, 'a');

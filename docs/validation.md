@@ -2,11 +2,28 @@
 
 [English README](../README.md) · [中文说明](../README.zh-CN.md)
 
+## Compatibility verification
+
+The declared DSH range is >=0.2.2-rc.1 without an artificial upper bound. The executable matrix uses published rc.1, rc.2, rc.3, rc.4 and rc.5. A future version is eligible for this range, but its behavior is not verified until the same checks pass.
+
+Build and pack once, then run the existing tests from physical fixture files against each isolated exact DSH dependency closure:
+
+```sh
+npm run build
+mkdir -p artifacts
+npm pack --ignore-scripts --pack-destination artifacts
+npm run test:compatibility
+```
+
+The runner checks the installed archive integrity, native entry resolution paths and exact host versions, loads the public package entries, and enables BrowserSkill fixtures with a local runner. It clears NODE_PATH/NODE_OPTIONS. No live profile, browser, credentials or paid provider is needed. The same bytes are used by every host cell. Tests exercise native authorization denial, caller identity, cancellation, completion, Team coexistence, normalized model metadata, unknown shapes and the existing Client contracts.
+
+A separate process creates a real persisted task on rc.1, then rc.5 resumes its parent and the same child with the original snapshot, tools and preset despite a later role override. The runner retains logs, installed fixture resources and upgrade state under .agentdeck-dev/compatibility for inspection, and removes each temporary host closure after its proof to bound disk use. Remove that owned directory after collecting results. --root, --versions and --archive support targeted reproduction. The CI/release gate runs this procedure before preserving the publishable archive. A local pass is not a remote workflow result.
+
 ## Recorded baseline
 
 AgentDeck 0.2.4 was exercised with DSH 0.2.2-rc.3, Node.js 24, and BrowserSkill 0.5.0 for the optional browser path. The full local suite passed **173 tests, zero failures and zero skips**. TypeScript checking and package resource validation also passed. This records observed validation, not a promise of compatibility with other DSH releases or model gateways.
 
-The repository's CI runs its own checks against the pinned host and an isolated BrowserSkill fixture installation. Its workflow badge reports that run separately; a local pass does not imply a remote CI pass.
+The repository's CI runs the source checks and the same-archive five-host matrix with isolated BrowserSkill fixtures. Its workflow badge reports that run separately; a local pass does not imply a remote CI pass.
 
 ## Current source verification — 0.2.7 progressive batch setup
 

@@ -8,7 +8,7 @@ Pull requests and pushes to `main` run [CI](../.github/workflows/ci.yml). A `vX.
 
 1. Check out that exact tag, require its version to match `package.json`, and verify that the commit belongs to `main`.
 2. Install the pinned DSH host and isolated BrowserSkill fixtures; run TypeScript, the full test suite and package-content checks.
-3. Pack the tested build and pass that archive to a separate publishing job. Test jobs have no npm publishing identity.
+3. Pack the tested build once. Run the same archive against isolated DSH rc.1–rc.5 closures and persisted rc.1-to-rc.5 continuation, then pass that archive to a separate publishing job. Test jobs have no npm publishing identity.
 4. Publish the archive through npm Trusted Publishing (OIDC), verify its public registry integrity and downloaded bytes, then create the GitHub Release with the same `.tgz` and `SHA256SUMS`.
 
 Stable versions use npm `latest`. Versions with a prerelease suffix use npm `next` and a GitHub prerelease. The workflow does not bump versions. It never overwrites an npm version or a Release asset. A rerun checks the existing archive integrity. If repacking changed archive metadata or group/other read permission bits, every regular file's content and all remaining permission bits must still match the tested package. The workflow then retains the immutable original npm archive, verifies existing Release assets and uploads only missing assets. Changed content, file types, write permissions or executable permissions require a new version.
@@ -56,7 +56,7 @@ Use the actual failed version tag in place of `v0.2.4`. If the version is not on
 
 1. 检出该标签，要求版本与 `package.json` 一致，并确认提交属于 `main`。
 2. 安装固定版本的 DSH 宿主和隔离 BrowserSkill 测试依赖，执行 TypeScript、完整测试和包内容检查。
-3. 将通过测试的构建打成安装包，传给独立发布作业；测试作业没有 npm 发布身份。
+3. 仅打包一次，在隔离的 DSH rc.1–rc.5 依赖环境以及 rc.1 到 rc.5 持久化恢复中验证同一安装包，再传给独立发布作业；测试作业没有 npm 发布身份。
 4. 通过 npm 可信发布（Trusted Publishing / OIDC）发布该安装包，核对公开 registry 的完整性和下载字节，再创建包含相同 `.tgz` 与 `SHA256SUMS` 的 GitHub Release。
 
 稳定版使用 npm `latest`；带预发布后缀的版本使用 npm `next` 和 GitHub 预发布。工作流不自动递增版本，不覆盖 npm 版本或 Release 附件。重跑时先核对归档完整性；如果重新打包仅改变归档元数据或组／其他用户的读取权限位，则逐个核对全部普通文件的内容和其余权限位，确认相同后保留 npm 上不可变的原始安装包。已有附件逐字节核验，仅补传缺失附件。文件内容、类型、写入或执行权限发生变化时，必须使用新版本。

@@ -29,7 +29,7 @@ export function loadBuiltinSkills(): SkillDefinition[] {
 interface RoleSpec {
   id: string; en: string; zh: string; description: string; descriptionZh: string;
   capabilities: string[]; skill: string; scripts?: string[]; inputs: string[]; deliverables: string[];
-  target?: number; elastic?: number; extends?: string;
+  extends?: string;
 }
 const roles: RoleSpec[] = [
   {
@@ -47,7 +47,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read'], skill: 'repository-map', scripts: ['assets/scripts/repository-map.mjs'],
     inputs: ['Symbol, behavior or feature to locate', 'Repository root and relevant paths'],
     deliverables: ['Entry points and call-path map with file locations', 'Existing extension patterns and unresolved questions'],
-    target: 10000, elastic: 24000,
   },
   {
     id: 'researcher', en: 'Researcher', zh: '研究员',
@@ -56,7 +55,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'web-research'], skill: 'bounded-research',
     inputs: ['Question and decision it supports', 'Date range, source constraints and desired depth'],
     deliverables: ['Direct answer with linked evidence', 'Conflicting findings, confidence and remaining gaps'],
-    target: 16000, elastic: 40000,
   },
   {
     id: 'reader', en: 'Reader', zh: '材料阅读员',
@@ -65,7 +63,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read'], skill: 'evidence-reading', scripts: ['assets/scripts/document-outline.mjs'],
     inputs: ['Documents or source paths', 'Questions to answer and required citation detail'],
     deliverables: ['Structured synthesis tied to source locations', 'Coverage statement and contradictions'],
-    target: 16000, elastic: 48000,
   },
   {
     id: 'architect', en: 'Architect', zh: '架构师',
@@ -74,7 +71,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'web-research', 'artifact-write'], skill: 'architecture-decisions',
     inputs: ['Problem, constraints and acceptance criteria', 'Current contracts, integrations and operational limits'],
     deliverables: ['Recommended design with alternatives and rationale', 'Interfaces, failure handling and implementation sequence'],
-    target: 18000, elastic: 48000,
   },
   {
     id: 'implementer', en: 'Implementer', zh: '实现工程师',
@@ -83,7 +79,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'source-edit', 'project-runner'], skill: 'scoped-implementation', scripts: ['assets/scripts/project-checks.mjs'],
     inputs: ['Authorized behavior change and owned paths', 'Acceptance criteria and relevant contracts'],
     deliverables: ['Complete patch within ownership scope', 'Relevant verification results and remaining limitations'],
-    target: 18000, elastic: 48000,
   },
   {
     id: 'test-runner', en: 'Test runner', zh: '测试执行员',
@@ -92,7 +87,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'project-runner'], skill: 'project-checks', scripts: ['assets/scripts/project-checks.mjs'],
     inputs: ['Check commands or changed behavior', 'Project root, environment and time limits'],
     deliverables: ['Executed checks with exit status and concise evidence', 'Failure classification and precise unblock condition'],
-    target: 10000, elastic: 24000,
   },
   {
     id: 'test-designer', en: 'Test designer', zh: '测试设计师',
@@ -101,7 +95,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'source-edit', 'project-runner'], skill: 'test-design', scripts: ['assets/scripts/project-checks.mjs'],
     inputs: ['Behavior contract and acceptance criteria', 'Existing tests, fixtures and authorized test paths'],
     deliverables: ['Behavior-focused cases and implemented tests when authorized', 'Coverage rationale and actual execution results'],
-    target: 14000, elastic: 36000,
   },
   {
     id: 'debugger', en: 'Debugger', zh: '故障排查员',
@@ -110,7 +103,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'source-edit', 'project-runner'], skill: 'fault-isolation', scripts: ['assets/scripts/project-checks.mjs'],
     inputs: ['Reproduction, observed failure and expected behavior', 'Relevant logs, environment and allowed change scope'],
     deliverables: ['Supported root cause and minimal correction', 'Before-and-after reproduction and regression evidence'],
-    target: 18000, elastic: 48000,
   },
   {
     id: 'reviewer', en: 'Reviewer', zh: '代码审查员',
@@ -119,7 +111,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read'], skill: 'change-review',
     inputs: ['Change, diff or file set to review', 'Behavior contract and relevant callers'],
     deliverables: ['Prioritized defects with precise file locations', 'Review coverage and material unverified behavior'],
-    target: 16000, elastic: 40000,
   },
   {
     id: 'ui-verifier', en: 'UI verifier', zh: '界面验证员',
@@ -128,7 +119,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'browser-observe', 'browser-interact'], skill: 'browser-verification',
     inputs: ['Existing application URL and user journey', 'Expected visible behavior and permitted interactions'],
     deliverables: ['Observed journey results and reproducible UI defects', 'Screenshots or accessibility evidence when useful'],
-    target: 14000, elastic: 32000,
   },
   {
     id: 'data-analyst', en: 'Data analyst', zh: '数据分析师',
@@ -137,7 +127,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'data-query', 'project-runner', 'artifact-write'], skill: 'data-analysis', scripts: ['assets/scripts/csv-profile.mjs'],
     inputs: ['Dataset or read access and analysis question', 'Metric definitions, units, grain and privacy constraints'],
     deliverables: ['Reproducible results with assumptions and denominators', 'Data quality findings and useful tables or artifacts'],
-    target: 16000, elastic: 40000,
   },
   {
     id: 'docs-writer', en: 'Documentation writer', zh: '文档作者',
@@ -146,7 +135,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'source-edit', 'artifact-write'], skill: 'documentation',
     inputs: ['Audience, user task and authorized document paths', 'Current implementation and source of truth'],
     deliverables: ['Complete documentation with working examples', 'Explicit prerequisites and verification limits'],
-    target: 14000, elastic: 32000,
   },
   {
     id: 'security-reviewer', en: 'Security reviewer', zh: '安全审查员', extends: 'reviewer',
@@ -155,7 +143,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read'], skill: 'security-review',
     inputs: ['Review target and threat assumptions', 'Authentication, authorization and data-flow contracts'],
     deliverables: ['Reachable security findings with impact and remediation', 'Trust-boundary coverage and evidence limitations'],
-    target: 18000, elastic: 48000,
   },
   {
     id: 'performance-debugger', en: 'Performance debugger', zh: '性能排查员', extends: 'debugger',
@@ -164,7 +151,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read', 'source-edit', 'project-runner'], skill: 'performance-investigation', scripts: ['assets/scripts/project-checks.mjs'],
     inputs: ['Slow workload and reproducible environment', 'Latency, throughput or resource objective and edit scope'],
     deliverables: ['Measured bottleneck and supported cause', 'Paired before-and-after results with correctness checks'],
-    target: 18000, elastic: 48000,
   },
   {
     id: 'long-document-reader', en: 'Long document reader', zh: '长文档阅读员', extends: 'reader',
@@ -173,7 +159,6 @@ const roles: RoleSpec[] = [
     capabilities: ['files-read'], skill: 'long-document-reading', scripts: ['assets/scripts/document-outline.mjs'],
     inputs: ['Large document collection and questions', 'Coverage requirement and context constraints'],
     deliverables: ['Cited synthesis and navigable evidence index', 'Read coverage, unresolved contradictions and recovery notes'],
-    target: 32000, elastic: 96000,
   },
 ];
 
@@ -185,13 +170,13 @@ Complete authorized work and the smallest relevant checks. Report actual results
 
 export function loadBuiltinAgents(): AgentDefinition[] {
   return roles.map(role => validateAgent({
-    schemaVersion: 1, id: role.id, title: { en: role.en, zh: role.zh },
+    schemaVersion: 3, id: role.id, title: { en: role.en, zh: role.zh },
     description: { en: role.description, zh: role.descriptionZh },
     instructions: `${asset(`agents/${role.id}.md`)}\n\n${sharedInstructions}`,
     capabilities: role.capabilities, skills: role.skill === 'task-handoff' ? ['task-handoff'] : ['task-handoff', role.skill],
     scripts: role.scripts ?? [], inputs: role.inputs, deliverables: role.deliverables,
     model: { mode: 'inherit' }, reasoning: { mode: 'inherit-compatible' },
-    context: { targetTokens: role.target ?? 12000, elasticTokens: role.elastic ?? 32000 }, enabled: true,
+    enabled: true,
     ...(role.extends ? { extends: role.extends } : {}),
   }));
 }

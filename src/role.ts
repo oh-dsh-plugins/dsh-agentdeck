@@ -17,6 +17,7 @@ export const Config = Schema.object({ snapshot: Schema.any().required() }) as Sc
 const attached = new WeakMap<RuntimeAgent, { id: string; ready: Promise<() => void | Promise<void>> }>();
 
 function ceiling(snapshot: RoleSnapshot): number {
+  if (!snapshot.budget) throw new Error('Legacy AgentDeck snapshot is missing its historical budget.');
   const limits = [snapshot.budget.elasticTokens, snapshot.budget.safeInputTokens].filter((value): value is number => value !== undefined);
   if (limits.some(value => !Number.isSafeInteger(value) || value < 1)) throw new Error('AgentDeck snapshot has no usable total-input budget.');
   return Math.min(...limits);
@@ -52,8 +53,10 @@ function catalog(snapshot: RoleSnapshot): string {
     `AgentDeck role: ${snapshot.role.id}; immutable snapshot: ${snapshot.id}.`,
     'Work as a leaf Agent. Preserve the delegated objective, authorization, owned paths and required evidence. Available capabilities do not expand task authorization.',
     'Follow applicable workspace instructions. Read nested AGENTS.md instructions before acting on files below their directory.',
-    `Context budgets count all input, including instructions, tools, history and pending material: target ${snapshot.budget.targetTokens} tokens; total ceiling ${ceiling(snapshot)} tokens. Use bounded sources and native compaction; return a precise limitation when the retained input cannot fit.`,
-    ...snapshot.budget.diagnostics.map(diagnostic => `Budget diagnostic: ${diagnostic}`),
+    ...(snapshot.policyVersion === 1 ? [
+      `Historical context policy: target ${snapshot.budget!.targetTokens} tokens; total ceiling ${ceiling(snapshot)} tokens. Use bounded sources and native compaction.`,
+      ...snapshot.budget!.diagnostics.map(diagnostic => `Budget diagnostic: ${diagnostic}`),
+    ] : ['Use the actual model context window and native compaction. Read large sources in bounded sections. Preserve completed work when recovery cannot reduce an indivisible input.']),
     'Load relevant instructions with agentdeck_skill before using a catalog skill:',
     ...snapshot.skills.map(skill => `- ${skill.id}: ${skill.description}`),
     ...(snapshot.role.scripts.length ? ['Snapshot-owned helper resources:', ...snapshot.role.scripts.map(path => `- ${path} (${snapshot.scriptRevisions?.[path] ?? 'revision unavailable'})`)] : []),
@@ -70,8 +73,9 @@ export function bindRoleAgent(context: HostContext, agent: RuntimeAgent, input: 
   }
   const snapshot = jsonClone(input);
   const ready = (async () => {
-    if (snapshot.policyVersion !== 1) throw new Error(`Unsupported AgentDeck role policy ${snapshot.policyVersion}.`);
-    const maximum = ceiling(snapshot);
+    if (snapshot.policyVersion !== 1 && snapshot.policyVersion !== 2) throw new Error(`Unsupported AgentDeck role policy ${snapshot.policyVersion}.`);
+    const legacy = snapshot.policyVersion === 1;
+    const maximum = legacy ? ceiling(snapshot) : undefined;
     const ctx = agent.ctx as HostContext;
     const current = agent.model.current();
     if (current?.provider !== snapshot.model.provider || current?.model !== snapshot.model.model) throw new Error('AgentDeck snapshot model route differs from this Agent; create an authorized snapshot for its current route.');
@@ -79,22 +83,23 @@ export function bindRoleAgent(context: HostContext, agent: RuntimeAgent, input: 
     if (!llm) throw new Error('AgentDeck role model validation requires the native llm service.');
     await llm.resolveCallConfig({ provider: snapshot.model.provider, model: snapshot.model.model,
       ...(snapshot.model.reasoningEffort === undefined ? {} : { reasoningEffort: snapshot.model.reasoningEffort }),
-      ...(snapshot.model.maxTokens === undefined ? {} : { maxTokens: snapshot.model.maxTokens }) }, signal);
-    if (snapshot.model.maxTokens !== undefined && (!Number.isSafeInteger(snapshot.model.maxTokens) || snapshot.model.maxTokens < 1)) throw new Error('Snapshot maxTokens must be a positive safe integer.');
-    // AgentOptions is the public output-control API. Pin before any queued input runs,
-    // including cold resume where native creation options can otherwise differ.
-    if (snapshot.model.maxTokens === undefined) delete agent.options.maxTokens;
-    else agent.options.maxTokens = snapshot.model.maxTokens;
-    if (agent.options.maxTokens !== snapshot.model.maxTokens) throw new Error('Could not retain the snapshot output limit.');
+      ...(!legacy || snapshot.model.maxTokens === undefined ? {} : { maxTokens: snapshot.model.maxTokens }) }, signal);
+    if (legacy) {
+      if (snapshot.model.maxTokens !== undefined && (!Number.isSafeInteger(snapshot.model.maxTokens) || snapshot.model.maxTokens < 1)) throw new Error('Snapshot maxTokens must be a positive safe integer.');
+      // Existing snapshots retain their historical semantics on cold resume.
+      if (snapshot.model.maxTokens === undefined) delete agent.options.maxTokens;
+      else agent.options.maxTokens = snapshot.model.maxTokens;
+      if (agent.options.maxTokens !== snapshot.model.maxTokens) throw new Error('Could not retain the snapshot output limit.');
+    }
     agent.model.select({ provider: snapshot.model.provider, model: snapshot.model.model,
       ...(snapshot.model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(snapshot.model.reasoningEffort) }) });
     const meter = ctx.get('tokenMeter' as any) as any;
-    if (!meter) throw new Error('AgentDeck context policy requires the native tokenMeter service.');
+    if (legacy && !meter) throw new Error('AgentDeck context policy requires the native tokenMeter service.');
     const roleCatalog = catalog(snapshot);
     const instructions = await workspaceInstructions(ctx, agent, signal);
     signal.throwIfAborted();
-    const fixed = meter.estimateMessage(createSystemMessage([snapshot.role.instructions, roleCatalog, instructions].join('\n\n')));
-    if (fixed > maximum) throw new Error(`AgentDeck fixed instructions need approximately ${fixed} input tokens, exceeding the total ceiling ${maximum}; reduce instructions or select a larger budget before starting.`);
+    const fixed = legacy ? meter.estimateMessage(createSystemMessage([snapshot.role.instructions, roleCatalog, instructions].join('\n\n'))) : 0;
+    if (maximum !== undefined && fixed > maximum) throw new Error(`AgentDeck fixed instructions need approximately ${fixed} input tokens, exceeding the total ceiling ${maximum}; reduce instructions or select a larger budget before starting.`);
     const modelSelection = agent.model.current();
     if (!modelSelection) throw new Error('AgentDeck could not resolve its pinned model for tool discovery.');
     let discovery = await ctx.tools.resolve({ agent, modelSelection, signal });
@@ -134,6 +139,7 @@ export function bindRoleAgent(context: HostContext, agent: RuntimeAgent, input: 
       for (const release of registerRoleTools(ctx, agent, snapshot)) yield release;
       yield ctx.systemPrompt.section({ name: 'agentdeck:role-catalog', order: 80, interpolate: false, text: roleCatalog });
       if (instructions) yield ctx.systemPrompt.section({ name: 'agentdeck:workspace-instructions', order: 90, interpolate: false, text: instructions });
+      if (legacy) {
       yield ctx.on('system-prompt/assemble', async (_assembly: any, assembleContext: any, next: any) => {
         const presentation = await next(); observed = { presentation, toolSet: assembleContext.toolSet }; return presentation;
       });
@@ -149,9 +155,10 @@ export function bindRoleAgent(context: HostContext, agent: RuntimeAgent, input: 
         const promptTokens = meter.estimateMessage(createSystemMessage(renderPrompt(observed.presentation as any)));
         const pending = decision.messages.reduce((sum: number, message: any) => sum + meter.estimateMessage(message), 0);
         const projected = Math.max(0, measurement.totalTokens - previousSystem) + promptTokens + pending;
-        if (projected > maximum) throw new Error(`AgentDeck retained input is approximately ${projected} tokens after native recovery, above the total ceiling ${maximum}. Narrow the pending material or increase the role budget; no additional model request was sent.`);
+        if (projected > maximum!) throw new Error(`AgentDeck retained input is approximately ${projected} tokens after native recovery, above the total ceiling ${maximum}. Narrow the pending material or increase the role budget; no additional model request was sent.`);
         return decision;
       });
+      }
       if (browsers) {
         // Capture physical creation before later policy/cancellation can discard its value.
         // Observe only: every native post-execute decision remains authoritative.

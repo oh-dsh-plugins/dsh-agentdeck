@@ -58,9 +58,9 @@ test('new derived roles inherit the schema required by their selected saved base
       controller.setNewId('derived');
       assert.equal((await controller.save('@new')).ok, true, controller.getSnapshot().errors.save?.message);
       const result = controller.getSnapshot().catalog.agents.find(role => role.id === 'derived');
-      assert.equal(result.schemaVersion, 2);
+      assert.equal(result.schemaVersion, 3);
       assert.equal(result.model.mode, base === 'auto-base' ? 'auto' : 'inherit');
-      if (base === 'capped-base') assert.equal(result.output.maxTokens, 4096);
+      if (base === 'capped-base') assert.equal(Object.hasOwn(result, 'output'), false);
     } finally { controller.dispose(); }
   }
 });
@@ -73,7 +73,7 @@ test('switching the base updates the new draft schema without rewriting imported
     controller.setNewId('derived');
     controller.setNewBase('auto-base');
     assert.equal((await controller.save('@new')).ok, true, controller.getSnapshot().errors.save?.message);
-    assert.equal(controller.getSnapshot().catalog.agents.find(role => role.id === 'derived').schemaVersion, 2);
+    assert.equal(controller.getSnapshot().catalog.agents.find(role => role.id === 'derived').schemaVersion, 3);
     const imported = JSON.stringify({ schemaVersion: 2, id: 'imported-role', extends: 'auto-base' });
     await controller.importText(imported);
     controller.setNewBase('general');
@@ -81,18 +81,19 @@ test('switching the base updates the new draft schema without rewriting imported
   } finally { controller.dispose(); }
 });
 
-test('clearing an inherited output cap remains cleared after later edits, save and reload', async () => {
+test('legacy inherited caps stay inactive after editing and leave the saved base untouched', async () => {
   const { controller, rows } = fixture([{ schemaVersion: 2, id: 'derived', extends: 'capped-base' }]);
   try {
+    const originalBase = rows.get('capped-base');
     await controller.loadCatalog();
-    assert.equal(controller.getSnapshot().drafts.derived.form.output.maxTokens, 4096);
-    controller.updateForm('derived', { output: undefined });
+    assert.equal(controller.getSnapshot().drafts.derived.form.output, undefined);
     controller.updateForm('derived', { enabled: false });
     assert.equal((await controller.save('derived')).ok, true, controller.getSnapshot().errors.save?.message);
     const saved = controller.getSnapshot().catalog.agents.find(role => role.id === 'derived');
-    assert.equal(saved.output, undefined, 'blank output must not re-inherit the base cap');
+    assert.equal(saved.output, undefined);
     assert.equal(saved.enabled, false);
-    assert.equal(parse(rows.get('derived')).output, null, 'override encodes an explicit inherited-cap clear');
+    assert.equal(parse(rows.get('derived')).schemaVersion, 3);
+    assert.equal(rows.get('capped-base'), originalBase);
     await controller.loadCatalog();
     assert.equal(controller.getSnapshot().drafts.derived.form.output, undefined);
     assert.equal(controller.getSnapshot().drafts.derived.text, controller.getSnapshot().drafts.derived.baseline);

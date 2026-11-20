@@ -4,7 +4,11 @@ import { z } from 'zod';
 import type { HostContext, OverrideRecord, RoleSnapshot, RunRecord } from './types.js';
 
 const overrideSchema = z.object({ id: z.string(), text: z.string(), revision: z.string(), updatedAt: z.number() });
-const snapshotSchema = z.object({ id: z.string(), presetId: z.string(), role: z.record(z.string(), z.unknown()), skills: z.array(z.unknown()), budget: z.record(z.string(), z.unknown()), model: z.record(z.string(), z.unknown()), createdAt: z.number(), policyVersion: z.literal(1), scriptRevisions: z.record(z.string(), z.string()).optional(), composition: z.literal('native-minimal').optional(), webTools: z.boolean().optional(), sourceRevision: z.string().optional(), candidateId: z.string().optional() });
+const snapshotBase = z.object({ id: z.string(), presetId: z.string(), role: z.record(z.string(), z.unknown()), skills: z.array(z.unknown()), model: z.record(z.string(), z.unknown()), createdAt: z.number(), scriptRevisions: z.record(z.string(), z.string()).optional(), composition: z.literal('native-minimal').optional(), webTools: z.boolean().optional(), sourceRevision: z.string().optional(), candidateId: z.string().optional() });
+const snapshotSchema = z.discriminatedUnion('policyVersion', [
+  snapshotBase.extend({ policyVersion: z.literal(1), budget: z.record(z.string(), z.unknown()) }),
+  snapshotBase.extend({ policyVersion: z.literal(2) }),
+]);
 const runSchema = z.object({ id: z.string(), roleId: z.string(), revision: z.string(), parentId: z.string(), childId: z.string().optional(), description: z.string(), createdAt: z.number(), phase: z.enum(['starting', 'accepted', 'uncertain', 'failed']), error: z.string().optional(), model: z.record(z.string(), z.unknown()).optional(), fallback: z.object({ to: z.enum(['general', 'native']), reason: z.string() }).optional(), decision: z.object({ candidateId: z.string(), roleRevision: z.string(), source: z.enum(['default', 'recommended', 'legacy-route']), reason: z.string().optional() }).optional() });
 
 // Domain validates the public parse contract; the host and plugin may use different Zod minor typings.
