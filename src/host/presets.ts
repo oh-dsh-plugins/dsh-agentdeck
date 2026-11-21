@@ -2,6 +2,8 @@ import { fileURLToPath } from 'node:url';
 import type {} from '@deepseek-ai/dsh-agent-preset-registry';
 import type { HostContext, RoleSnapshot } from './types.js';
 
+import { usesBasicCompaction } from './capabilities.js';
+
 export class SnapshotPresets {
   private readonly registered = new Map<string, Promise<() => Promise<void>>>();
   constructor(private readonly ctx: HostContext) {}
@@ -11,6 +13,8 @@ export class SnapshotPresets {
     if (!registration) {
       const legacy = snapshot.policyVersion === 1;
       if (legacy && !snapshot.budget) throw new Error('Historical snapshot is missing its context policy.');
+      const basicCompaction = usesBasicCompaction(snapshot.policyVersion, !!this.ctx.get('compaction'));
+      if (basicCompaction && !this.ctx.get('tokenMeter')) throw new Error('AgentDeck basic compaction requires the native tokenMeter service.');
       const ratio = legacy && snapshot.model.contextWindow ? Math.min(0.8, snapshot.budget!.targetTokens / snapshot.model.contextWindow) : 0.8;
       const retained = legacy ? Math.max(128, Math.min(4096, Math.floor(snapshot.budget!.elasticTokens / 4))) : undefined;
       const canWrite = snapshot.role.capabilities.some(capability => capability === 'source-edit' || capability === 'artifact-write');
@@ -28,7 +32,7 @@ export class SnapshotPresets {
           ...(snapshot.role.capabilities.some(value => value.startsWith('browser-')) ? [{ id: 'agentdeck-browser-skill-loader', name: '@deepseek-ai/dsh-tool-skill' }] : []),
           { id: 'agentdeck-native-executor', name: '@deepseek-ai/dsh-tool-executor-native' },
           // A parent's isolated preset is a sibling, so only Host-wide recovery can be reused.
-          ...(legacy || !this.ctx.get('compaction') ? [{ id: 'agentdeck-compaction', name: 'cordis:group', group: true, isolate: { compaction: true as const }, config: [
+          ...(basicCompaction ? [{ id: 'agentdeck-compaction', name: 'cordis:group', group: true, isolate: { compaction: true as const }, config: [
             { id: 'agentdeck-compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: legacy ? {
               thresholdRatio: Math.max(0.01, ratio), retainTokens: retained,
               headroomTokens: snapshot.budget!.headroomTokens,

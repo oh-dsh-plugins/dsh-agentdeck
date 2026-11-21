@@ -76,6 +76,23 @@ test('repository inventory is deterministic, bounded, skips dependency trees and
   assert.equal(limited.truncated, true);
 });
 
+test('inventory at the limit ignores trailing excluded directories', t => {
+  const root = fixture(t);
+  writeFileSync(join(root, 'README.md'), 'Project');
+  mkdirSync(join(root, 'vendor'));
+  const result = run('repository-map', root, '--limit', '1');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).truncated, false);
+});
+
+test('heading text retains literal trailing hashes', t => {
+  const path = join(fixture(t), 'notes.md');
+  writeFileSync(path, '# C#\n## F# ###\n');
+  const result = run('document-outline', path);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).entries.map(entry => entry.title), ['C#', 'F#']);
+});
+
 test('document outline preserves line anchors, excludes fenced headings and labels truncation', t => {
   const root = fixture(t);
   const path = join(root, 'notes.md');
@@ -90,6 +107,16 @@ test('document outline preserves line anchors, excludes fenced headings and labe
   assert.equal(limited.truncated, true);
   writeFileSync(path, 'plain text\n'.repeat(81));
   assert.equal(JSON.parse(run('document-outline', path).stdout).kind, 'text-blocks');
+});
+
+test('CSV profiler counts explicitly quoted empty values in a single-column dataset', t => {
+  const path = join(fixture(t), 'single.csv');
+  writeFileSync(path, 'value\r\n\r\n""\r\n7\r\n""');
+  const result = run('csv-profile', path);
+  assert.equal(result.status, 0, result.stderr);
+  const data = JSON.parse(result.stdout);
+  assert.equal(data.totalRecords, 3);
+  assert.equal(data.columns[0].missing, 2);
 });
 
 test('CSV profiler supports quoted multiline fields, finite numeric stats, missing values and explicit sampling', t => {

@@ -1044,3 +1044,32 @@ test('portable transfer stays locked while a write receipt is pending', { timeou
     assert.equal(controller.adoptModelTransfer(), true, 'The same ready preview can be adopted once the receipt completes');
   } finally { receipt.resolve(ok(catalog([], [general, second]))); controller.dispose(); }
 });
+
+test('reset readback only accepts absence in the bound project', async () => {
+  for (const receiptProject of ['A','B']) {
+    let reads = 0;
+    const {controller} = harness(call => {
+      if (call.endpoint === 'agentdeck.catalog') return ok({ ...catalog(++reads === 1 ? [{id:'general',text:'id: general',revision:'rev'}] : []), project: reads === 1 ? 'A' : receiptProject });
+      if (call.endpoint === 'agentdeck.previewChange') return ok({id:'general',project:'A',reset:true,impacts:[],impactRevision:'preview'});
+      return {ok:false,error:{code:'AGENTDECK_WRITE_OUTCOME_UNKNOWN',message:'unknown'}};
+    });
+    try {
+      await controller.loadCatalog();
+      const receipt = await controller.reset('general');
+      assert.equal(receipt.observed, receiptProject === 'A');
+      assert.equal(receipt.uncertain, receiptProject !== 'A');
+    } finally { controller.dispose(); }
+  }
+});
+
+test('history load more appends within the selected parent', async () => {
+  const {controller,calls} = harness(({payload}) => ok(payload.cursor ? {runs:[{id:'old'}]} : {runs:[{id:'recent'}],nextCursor:'recent'}));
+  try {
+    controller.setRunParent('parent');
+    await controller.loadRuns();
+    await controller.loadRuns(true);
+    assert.deepEqual(calls.at(-1).payload,{parentId:'parent',cursor:'recent'});
+    assert.deepEqual(clone(controller.getSnapshot().runs.map(row=>row.id)), ['recent','old']);
+    assert.equal(controller.getSnapshot().runCursor, undefined);
+  } finally { controller.dispose(); }
+});

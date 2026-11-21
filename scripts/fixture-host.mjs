@@ -20,7 +20,7 @@ import {
 } from '../scripts/probe-native.mjs';
 
 let serial = 0;
-export async function fixture({ holdChild = false, subprocess = true, allowNativeFallback = false, policy, web = false, parentCompaction = false, directory, resumeSessionId } = {}) {
+export async function fixture({ holdChild = false, subprocess = true, allowNativeFallback = false, policy, web = false, parentCompaction = false, omitRecovery = false, directory, resumeSessionId } = {}) {
   const h = await createNativeHarness({ holdChild, policy, directory, resumeSessionId });
   const webCalls = [];
   const webReadyCalls = [];
@@ -40,9 +40,9 @@ export async function fixture({ holdChild = false, subprocess = true, allowNativ
     await bounded(ctx.plugin(StorageJson, { root: join(h.storageRoot, 'agentdeck-data') }), 'native JSON storage');
     await bounded(ctx.plugin(StorageDomain, { backend: 'json' }), 'native storage domain');
     await bounded(ctx.plugin(SkillRegistry), 'native skills');
-    await bounded(ctx.plugin(TokenMeter), 'native token meter');
+    if (!omitRecovery) await bounded(ctx.plugin(TokenMeter), 'native token meter');
     // Some hosts provide global recovery; Web instead isolates it in the parent preset.
-    if (!parentCompaction) await bounded(h.ctx.plugin(BasicCompaction, { headroomTokens: 1024, maxTokens: 1024, retainTokens: 128, thresholdRatio: 0.5 }), 'shared native host compaction');
+    if (!omitRecovery && !parentCompaction) await bounded(h.ctx.plugin(BasicCompaction, { headroomTokens: 1024, maxTokens: 1024, retainTokens: 128, thresholdRatio: 0.5 }), 'shared native host compaction');
     if (subprocess) await bounded(ctx.plugin(LocalSubprocess), 'native subprocess');
     if (web) {
       const { default: WebRuntime } = await import('@deepseek-ai/dsh-web');

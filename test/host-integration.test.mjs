@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { symlink, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -160,6 +160,10 @@ test('Host pipeline retains policy refusal and durable same-call idempotence wit
   const f = await fixture({ allowNativeFallback: true });
   let release;
   try {
+    const invalid = await start(f, { cwd: '   ' });
+    assert.equal(invalid.isError, true);
+    assert.match(text(invalid), /cwd must be a non-empty string/);
+    assert.equal([...f.domain().table('runs').entries()].length, 0);
     const callId = `denied-start-${++serial}`;
     release = f.h.parent.ctx.tools.guard(exec => exec.name.startsWith('agentdeck_native_') ? 'fixture denies the private native delegation' : undefined);
     const denied = await start(f, {}, { id: callId });
@@ -765,5 +769,33 @@ test('legacy auto candidates pin authorized route and effort without carrying re
     await f.h.waitForSettlement();
     assert.equal(f.h.starts.length, 3);
     assert.equal(noticeMessages(f.h).length, 3);
+  } finally { await f.close(); }
+});
+
+test('missing host recovery and token meter block both catalog availability and native startup', async () => {
+  const f = await fixture({ omitRecovery: true });
+  try {
+    const catalog = success(await f.call('scene_agent_catalog', { action: 'get', id: 'reader' }));
+    assert.equal(catalog.agent.available, false);
+    assert.ok(catalog.agent.missingCapabilities.includes('native-token-meter'));
+    const attempt = await start(f, { role: 'reader' });
+    assert.equal(attempt.isError, true);
+    assert.match(text(attempt), /basic compaction requires the native tokenMeter/);
+    assert.equal(f.h.starts.length, 0);
+  } finally { await f.close(); }
+});
+
+test('explicit relative child cwd selects the target project role before native startup', async () => {
+  const f = await fixture();
+  try {
+    const target = join(f.h.storageRoot, 'project-b');
+    const folder = join(target, '.dsh', 'agentdeck');
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, 'local.yaml'), 'schemaVersion: 3\nid: target-reader\nextends: reader\ninstructions: Read with project B rules.');
+    const choice = success(await f.call('scene_agent_catalog', {action:'candidates', id:'target-reader', cwd:'project-b'}));
+    const run = success(await start(f, { role:'target-reader', cwd:'project-b', revision:choice.revision }));
+    const snapshot = f.domain().table('snapshots').get(run.revision);
+    assert.equal(snapshot.role.instructions, 'Read with project B rules.');
+    assert.equal(f.ctx.get('workingDirectory').get(f.ctx.agents.get(run.childId).session), target);
   } finally { await f.close(); }
 });

@@ -250,3 +250,25 @@ test('data helper provides bounded numeric summaries without raw samples', async
     assert.equal(JSON.parse(csv.value.stdout).columns[0].mean, 5);
   } finally { await f.close(); }
 });
+
+test('admitted long single-line attachment can be reconstructed through the tool cursor', async () => {
+  const f = await fixture(await snapshot());
+  try {
+    const data = ' '.repeat(23998) + JSON.stringify('🌿' + '界🌿'.repeat(20000));
+    const ref = { attachmentId: 'owned', name: 'long.json', bytes: Buffer.byteLength(data) };
+    f.h.ctx.provide('attachments', { async *readFileStream() { yield Buffer.from(data); } });
+    const agent = await f.start();
+    agent.session.deriveMessages = () => [{ content: [{ type: 'file', attachment: ref }] }];
+    let cursor = {};
+    let reconstructed = '';
+    do {
+      const page = await f.call('agentdeck_read_attachment', { attachment_id: ref.attachmentId, ...cursor });
+      assert.equal(page.isError, false, text(page));
+      assert.ok(page.value.text.length <= 24000);
+      assert.ok(page.value.text.isWellFormed(), 'each rendered attachment page contains complete Unicode characters');
+      reconstructed += page.value.text;
+      cursor = page.value.next;
+    } while (cursor);
+    assert.equal(reconstructed, data);
+  } finally { await f.close(); }
+});

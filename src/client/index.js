@@ -38,12 +38,15 @@ window.__ModuleLoader__.load({
       if (!agent || preview?.agent?.id !== agent.id || preview.agent.revision !== agent.revision) return agent;
       if (!defaultRoute) return preview.agent;
       // Live capability evidence also updates the list. Its model badge still describes the saved default.
-      return { ...preview.agent, authorization: agent.authorization, configuredSelection: agent.configuredSelection,
-        available: Boolean(preview.agent.capabilitiesAvailable && agent.authorization?.status === 'authorized') };
+      const sameChoice = JSON.stringify(preview.configuredSelection) === JSON.stringify(agent.configuredSelection);
+      return { ...preview.agent, validation: sameChoice ? preview.agent.validation : undefined, authorization: agent.authorization, configuredSelection: agent.configuredSelection,
+        available: Boolean((!sameChoice || !preview.agent.validation || preview.agent.validation === 'valid') && preview.agent.capabilitiesAvailable && agent.authorization?.status === 'authorized') };
     }
     function roleStatus(agent, selectedModel = false) {
       if (!agent.enabled) return 'disabled';
       if (agent.authorization?.status === 'denied') return selectedModel ? 'selectedModelDenied' : 'modelDenied';
+      if (agent.validation === 'invalid') return 'unavailable';
+      if (agent.validation === 'unverified') return 'unknown';
       if (agent.missingCapabilities?.length) return 'unavailable';
       if (agent.unverifiedCapabilities?.length) return 'capabilityUnknown';
       if (agent.authorization?.status !== 'authorized') return 'authorizationUnknown';
@@ -85,7 +88,7 @@ window.__ModuleLoader__.load({
       let state = {
         catalog: null, selectedId: '', sessionId: '', runParentId: '', runParents: [], tab: 'roles', drafts: {},
         evidence: {}, suggestions: {}, changePreview: null, changeAccepted: {}, transfer: null,
-        models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, suggestionModelOptions: {}, preview: null, previewCandidates: {}, runs: null, result: null, resultChild: '', resultStale: false,
+        models: null, modelOptions: {}, modelMetadata: {}, providers: [], providersLoaded: false, suggestionModelOptions: {}, preview: null, previewCandidates: {}, runs: null, runCursor: null, result: null, resultChild: '', resultStale: false,
         creating: false, newId: '', newBase: 'general', imported: false, identity: null,
         errors: {}, busy: {}, notice: ''
       };
@@ -476,7 +479,7 @@ window.__ModuleLoader__.load({
           preview = state.changePreview?.key === input.key ? state.changePreview : null;
           if (!preview) return { ok: false };
         }
-        const impacts = preview.impacts || [];
+        const impacts = (preview.impacts || []).filter(impact => impact.requiresAcceptance !== false);
         if (impacts.some(impact => state.changeAccepted[impact.id] !== true)) return { ok: false, needsAcceptance: true, value: preview };
         const text = preview.text;
         const { actions: _actions, baseText: _baseText, ...bound } = input.request;
@@ -513,7 +516,7 @@ window.__ModuleLoader__.load({
           preview = state.changePreview?.key === input.key ? state.changePreview : null;
           if (!preview) return { ok: false };
         }
-        const impacts = preview.impacts || [];
+        const impacts = (preview.impacts || []).filter(impact => impact.requiresAcceptance !== false);
         if (impacts.some(impact => state.changeAccepted[impact.id] !== true)) return { ok: false, needsAcceptance: true, value: preview };
         const { reset: _reset, ...bound } = input.request;
         const payload = { ...bound, impactRevision: preview.impactRevision, acceptedIndirectRoles: impacts.map(impact => impact.id) };
@@ -527,8 +530,8 @@ window.__ModuleLoader__.load({
           accept('resetDone');
         });
         if (answer.error?.code.startsWith('AGENTDECK_IMPACT_')) invalidateChange();
-        if (answer.uncertain) return readChangeReceipt('reset', payload, stored => {
-          if (stored) return false;
+        if (answer.uncertain) return readChangeReceipt('reset', payload, (stored, catalog) => {
+          if ((preview.project && catalog.project !== preview.project) || stored) return false;
           accept('changeObserved');
           return true;
         });
@@ -540,7 +543,7 @@ window.__ModuleLoader__.load({
         const scope = payload.sessionId ? { sessionId: payload.sessionId } : {};
         let observed = false;
         await request('changeReceipt', 'catalog', scope, catalog => {
-          observed = observe(catalog.overrides.find(item => item.id === payload.id));
+          observed = observe(catalog.overrides.find(item => item.id === payload.id), catalog);
         });
         if (observed) {
           error(kind, null);
@@ -771,7 +774,7 @@ window.__ModuleLoader__.load({
       function setRunParent(parentId) {
         requests.get('runs')?.abort(); requests.delete('runs');
         api.closeResult();
-        publish({ runParentId: parentId, runs: null, busy: { ...state.busy, runs: false }, errors: { ...state.errors, runs: null } });
+        publish({ runParentId: parentId, runs: null, runCursor: null, busy: { ...state.busy, runs: false }, errors: { ...state.errors, runs: null } });
       }
       const suggestionKey = id => JSON.stringify([state.drafts[id]?.form, state.drafts[id]?.text, state.drafts[id]?.kind, findAgent(id)?.revision, state.suggestions[id]?.generator, state.suggestions[id]?.requirements || '', state.suggestions[id]?.candidatePlan || 'auto']);
       function invalidateSuggestion(id) {
@@ -824,9 +827,10 @@ window.__ModuleLoader__.load({
         isDisposed: () => disposed,
         set: publish, error, openModelExport, exportModels, importModels, updateModelTransfer, mapTransferRoute, setTransferDefault, removeTransferRoute, transferIssue, checkModelTransfer, previewModelTransfer, adoptModelTransfer, openForm, restoreField, loadModelMetadata, loadCatalog, select, canEdit, useProjectEdit, edit, updateForm, setModelMode, updateCandidate, addCandidate, removeCandidate, selectPreviewCandidate, beginCreate, setNewId, setNewBase, importText, useExistingDocument, materializeDraft, save, reset, discard, setSession,
         loadModels, loadProviders, loadSuggestionModelOptions, suggestionModelOptionsState, loadModelOptions, modelOptionsState, modelMetadataState, loadCandidateOptions, loadCandidateMetadata, setCandidateProvider, setCandidateModel, loadPreview, syncReads, refresh, previewChange, acceptChangeImpact, setRunParent, openSuggestion, updateSuggestion, generateSuggestion, adoptSuggestion, suggestionCurrent,
-        loadRuns: () => {
-          api.closeResult();
-          return request('runs', 'runs', runSessionPayload(), value => publish({ runs: value.runs, runParents: value.parentIds || state.runParents }));
+        loadRuns: (more = false) => {
+          const cursor = more && state.runCursor;
+          if (!cursor) api.closeResult();
+          return request('runs', 'runs', { ...runSessionPayload(), ...(cursor ? { cursor } : {}) }, value => publish({ runCursor: value.nextCursor, runs: cursor ? [...state.runs, ...value.runs] : value.runs, runParents: value.parentIds || state.runParents }));
         },
         closeResult: () => { requests.get('result')?.abort(); requests.delete('result'); publish({ result: null, resultChild: '', resultStale: false, busy: { ...state.busy, result: false }, errors: { ...state.errors, result: null } }); },
         loadResult(childId, more = false) {
@@ -1031,6 +1035,7 @@ window.__ModuleLoader__.load({
           h('h3', null, agent ? localized(agent.title) : state.selectedId),
           h('div', { className: 'ad-role-meta' }, h('code', null, state.selectedId), agent && h('span', null, t(agent.builtin ? 'builtin' : 'custom')), override && h('span', null, t('override')))),
           h('div', { className: 'ad-actions' }, agent && h(Button, { disabled: readOnly, onClick: () => controller.beginCreate(agent.id) }, t('derive')), h(Button, { onClick: () => exportDraft(state.selectedId) }, t('export')))),
+        agent?.extends && h('p', { className: 'ad-help' }, t('effectiveParent', { id: agent.extends, source: state.catalog?.agents.find(item => item.id === agent.id)?.parentSource || 'builtin' })),
         agent && h('p', { className: 'ad-detail-desc' }, localized(agent.description)),
         (readOnly || draft.writeSessionId) && h('div', { className: 'ad-actions' },
           h('p', { className: 'ad-help', role: 'status' }, t(readOnly ? dirty ? 'draftScopeMismatch' : 'projectReadOnly' : 'projectWriteBound', { session: draft.writeSessionId || t('noSession') })),
@@ -1124,13 +1129,15 @@ window.__ModuleLoader__.load({
       if (!change) return null;
       return h('section', { className: 'ad-section', 'aria-label': t('changeReview') },
         h('h4', null, t('changeReview') + ' · ' + change.id), h('p', { className: 'ad-help' }, t(change.reset ? 'changeDelete' : 'changeWrite')),
+        change.parent && h('p', { className: 'ad-help' }, t('effectiveParent', change.parent)),
+        change.project && h('p', { className: 'ad-help' }, t('setupImpactOtherProject', { cwd: change.project })),
         change.direct && h('div', { className: 'ad-fields' }, h(CodeDetail, { title: t('setupBefore'), value: roleReview(change.direct.before) }), h(CodeDetail, { title: t('setupAfter'), value: roleReview(change.direct.after) })),
         h(CodeDetail, { title: t('setupBefore'), value: change.currentText }), h(CodeDetail, { title: t('setupYaml'), value: change.text }),
         change.impacts.map(impact => h('article', { className: 'ad-candidate', key: impact.id },
           h('strong', null, (impact.title ? locale.resolveText(impact.title) + ' · ' : '') + impact.id),
           [['setupImpactProject', impact.scope !== 'projects' && impact.scope !== 'global' && impact], ['setupImpactGlobal', impact.global || (impact.scope === 'global' && impact)], ...(impact.projects || []).map(project => ['setupImpactOtherProject', project])].filter(([, entry]) => entry).map(([label, entry]) => h('div', { key: entry.cwd || label },
             h('p', null, t(label, { cwd: entry.cwd })), h(CodeDetail, { title: t('setupBefore'), value: entry.before }), h(CodeDetail, { title: t('setupAfter'), value: entry.after }))),
-          h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: state.changeAccepted[impact.id] === true, disabled: state.busy.save || state.busy.reset, onChange: event => controller.acceptChangeImpact(impact.id, event.target.checked) }), t('setupAcceptImpact')))));
+          impact.requiresAcceptance !== false && h('label', { className: 'ad-check' }, h('input', { type: 'checkbox', checked: state.changeAccepted[impact.id] === true, disabled: state.busy.save || state.busy.reset, onChange: event => controller.acceptChangeImpact(impact.id, event.target.checked) }), t('setupAcceptImpact')))));
     }
     function NewRole({ state, controller, t, locale, exportDraft }) {
       const { kind: discarding, open: openConfirmation, close: closeConfirmation, cancelButton } = useConfirmation();
@@ -1155,7 +1162,7 @@ window.__ModuleLoader__.load({
         duplicate && h('p', { role: 'status' }, t('existingTarget', { id, revision: (override?.revision || existing?.revision || '').slice(0, 12) })),
         conflict && h('p', { className: 'ad-warning' }, t('draftConflict')),
         source && h('p', { className: 'ad-warning' }, t('setupSourceProtected') + ' · ' + source),
-        h('div', { className: 'ad-actions', style: { marginTop: 12 } }, duplicate ? h(Button, { primary: true, disabled: conflict || Boolean(source), onClick: () => controller.useExistingDocument() }, t('useExistingTarget')) : h(Button, { primary: true, disabled: !id || state.busy.identity || state.busy.changePreview || state.busy.save || change?.impacts.some(item => !state.changeAccepted[item.id]), onClick: () => controller.save('@new') }, t(state.busy.save ? 'saving' : 'create')), h(Button, { onClick: () => exportDraft('@new') }, t('export')), h(Button, { disabled: state.busy.save, onClick: () => controller.set({ creating: false }) }, t('cancel')), h(Button, { danger: true, disabled: state.busy.save, onClick: event => openConfirmation(event, 'discard') }, t('discard'))),
+        h('div', { className: 'ad-actions', style: { marginTop: 12 } }, duplicate ? h(Button, { primary: true, disabled: conflict || Boolean(source), onClick: () => controller.useExistingDocument() }, t('useExistingTarget')) : h(Button, { primary: true, disabled: !id || state.busy.identity || state.busy.changePreview || state.busy.save || change?.impacts.some(item => item.requiresAcceptance !== false && !state.changeAccepted[item.id]), onClick: () => controller.save('@new') }, t(state.busy.save ? 'saving' : 'create')), h(Button, { onClick: () => exportDraft('@new') }, t('export')), h(Button, { disabled: state.busy.save, onClick: () => controller.set({ creating: false }) }, t('cancel')), h(Button, { danger: true, disabled: state.busy.save, onClick: event => openConfirmation(event, 'discard') }, t('discard'))),
         discarding && h('div', { className: 'ad-inline-confirm' }, h('p', null, t('discardConfirm')), h('div', { className: 'ad-actions' }, h(Button, { danger: true, onClick: () => { const drafts = { ...state.drafts }; delete drafts['@new']; controller.set({ drafts, creating: false }); closeConfirmation(); } }, t('discard')), h(Button, { buttonRef: cancelButton, onClick: closeConfirmation }, t('cancel'))))
       );
     }
@@ -1173,6 +1180,7 @@ window.__ModuleLoader__.load({
         h(ErrorNotice, { value: state.errors.runs, t }),
         state.busy.runs && h('p', { className: 'ad-empty', role: 'status' }, t('loading')),
         state.runs?.length === 0 && h('p', { className: 'ad-empty' }, t('noRuns')),
+        state.runCursor && h(Button, { disabled: state.busy.runs, onClick: () => controller.loadRuns(true) }, t('loadMore')),
         state.runs?.map(run => h('article', { className: 'ad-run', key: run.id },
           h('p', { className: 'ad-run-title' }, run.description),
           h('div', { className: 'ad-run-meta' }, h('code', null, run.roleId), h('span', null, t('phase') + ': ' + t(run.phase)), h('span', null, t('nativeStatus') + ': ' + enumText(run.nativeStatus, t)), h('span', null, t('businessStatus') + ': ' + enumText(businessStatus(run), t))),

@@ -597,6 +597,7 @@
     "setupAiProposalHint": "无需预先建立候选池。AI 使用所选供应商和模型请求一次并返回只读提案；你仍需选择角色、确认影响后才能保存。",
     "setupImpactGlobal": "全局配置",
     "setupImpactProject": "当前项目配置",
+    "effectiveParent": "生效的父角色 · {id}（{source}）",
     "setupImpactOtherProject": "项目配置 · {cwd}",
     "setupAiGenerator": "方案生成模型",
     "setupAiGeneratorHint": "选择已配置的供应商，再从建议中选择模型或输入模型 ID。生成方案时会检查所选模型是否可用。",

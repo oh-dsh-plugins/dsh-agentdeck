@@ -420,6 +420,7 @@
     "setupAiProposalHint": "No candidate pool is required. AI uses the selected provider and model once and returns a read-only proposal; you still choose rows and approve impacts before saving.",
     "setupImpactGlobal": "Global configuration",
     "setupImpactProject": "Current project configuration",
+    "effectiveParent": "Effective parent · {id} ({source})",
     "setupImpactOtherProject": "Project configuration · {cwd}",
     "setupAiGenerator": "Proposal generator",
     "setupAiGeneratorHint": "Choose a configured provider. Pick a suggested model or enter its ID. AgentDeck checks this route when you generate the proposal.",

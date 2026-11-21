@@ -23,10 +23,12 @@ async function main() {
     catch (error) { diagnostics.push({ path: relative(root, path) || '.', message: error.message }); return; }
     entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     for (const entry of entries) {
-      if (files.length >= limit) { truncated = true; return; }
+      if (truncated) return;
       const target = join(path, entry.name);
-      if (entry.isFile()) files.push(relative(root, target));
-      else if (entry.isDirectory() && !excluded.has(entry.name)) {
+      if (entry.isFile()) {
+        if (files.length === limit) { truncated = true; return; }
+        files.push(relative(root, target));
+      } else if (entry.isDirectory() && !excluded.has(entry.name)) {
         if (depth >= 12) { diagnostics.push({ path: relative(root, target), message: 'Maximum traversal depth reached' }); continue; }
         await visit(target, depth + 1);
       }

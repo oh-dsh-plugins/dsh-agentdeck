@@ -41,21 +41,30 @@ export class NativeDelegator implements TaskCommands {
     return pending;
   }
   async invoke(presetId: string | undefined, args: Record<string, unknown>, outer: ToolRunContext, snapshot?: RoleSnapshot): Promise<string> {
-    if (!outer.agent) throw new Error('Native delegation requires a real calling Agent.');
-    outer.signal.throwIfAborted();
-    const entry = await this.entry(presetId, snapshot?.policyVersion === 1 ? snapshot.model.maxTokens : undefined);
-    if (!this.ctx.tools.executable(entry.name, entry.key)) throw new NativeDelegationFailure('Native spawn provider is unavailable; no child was started.', true, 'AGENTDECK_PROVIDER_UNAVAILABLE');
-    const pipeline = new ToolExecutionPipeline(this.ctx, {
-      get: name => name === entry.name && !this.closed ? this.ctx.tools.executable(entry.name, entry.key) : undefined,
-    });
-    const prepared = await pipeline.prepare({
-      callId: `${outer.callId}:agentdeck-native` as any,
-      rootCallId: outer.rootCallId, parent: outer.token,
-      name: entry.name, arguments: args, agent: outer.agent, signal: outer.signal,
+    if (!outer.agent) throw new NativeDelegationFailure('Native delegation requires a real calling Agent.', true);
+    const { pipeline, prepared } = await (async () => {
+      outer.signal.throwIfAborted();
+      const entry = await this.entry(presetId, snapshot?.policyVersion === 1 ? snapshot.model.maxTokens : undefined);
+      if (!this.ctx.tools.executable(entry.name, entry.key)) throw new NativeDelegationFailure('Native spawn provider is unavailable; no child was started.', true, 'AGENTDECK_PROVIDER_UNAVAILABLE');
+      const pipeline = new ToolExecutionPipeline(this.ctx, {
+        get: name => name === entry.name && !this.closed ? this.ctx.tools.executable(entry.name, entry.key) : undefined,
+      });
+      const prepared = await pipeline.prepare({
+        callId: `${outer.callId}:agentdeck-native` as any,
+        rootCallId: outer.rootCallId, parent: outer.token,
+        name: entry.name, arguments: args, agent: outer.agent, signal: outer.signal,
+      });
+      return { pipeline, prepared };
+    })().catch(error => {
+      if (error instanceof NativeDelegationFailure) throw error;
+      throw new NativeDelegationFailure(error instanceof Error ? error.message : String(error), true);
     });
     const beforeDispatch = prepared.kind !== 'dispatch';
     const dispatched = prepared.kind === 'dispatch' ? await pipeline.dispatch(prepared.exec) : prepared;
-    const result = await pipeline.complete(prepared.exec, dispatched);
+    const result = await pipeline.complete(prepared.exec, dispatched).catch(error => {
+      if (!beforeDispatch) throw error;
+      throw new NativeDelegationFailure(error instanceof Error ? error.message : String(error), true);
+    });
     for (const context of result.additionalContexts ?? []) outer.deferContext(context);
     if (result.isError) throw new NativeDelegationFailure(result.error.message, beforeDispatch, result.error.info?.code);
     if (result.concludesTurn) outer.concludeTurn();

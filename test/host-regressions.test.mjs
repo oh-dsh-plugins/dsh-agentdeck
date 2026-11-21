@@ -92,7 +92,31 @@ test('selected project role can be a derivation parent and external edits are no
     const folder = join(f.directory, '.dsh', 'agentdeck');
     await mkdir(folder, { recursive: true });
     await writeFile(join(folder, 'project-reader.yaml'), 'schemaVersion: 1\nid: project-reader\nextends: reader\n');
-    await f.controller.save({ id: 'derived-reader', text: 'schemaVersion: 1\nid: derived-reader\nextends: project-reader\n' }, f.actor);
+    const text = 'schemaVersion: 1\nid: derived-reader\nextends: project-reader\n';
+    const saved = await f.controller.operation('save', { id: 'derived-reader', text }, f.actor);
+    assert.equal(saved.project, undefined);
+    await f.controller.operation('save', { id: saved.id, text: text + 'displayName: Shared reader\n', expectedRevision: saved.revision }, f.actor);
+    assert.equal((await f.controller.catalog(f.actor)).agents.find(r => r.id === saved.id).parentSource, join(folder, 'project-reader.yaml'));
+    const other = join(f.directory, 'other');
+    f.root.get('workingDirectory').get = session => session.header.cwd;
+    const actorB = { ...f.actor, session: { ...f.actor.session, header: { cwd: other } } };
+    await assert.rejects(f.controller.start({role:saved.id,prompt:'Read'}, {agent:actorB,callId:'missing-parent',signal:new AbortController().signal}), /Missing parent agent: project-reader/);
+    const inB = join(other, '.dsh', 'agentdeck');
+    await mkdir(inB, { recursive:true });
+    const parentPath = join(inB, 'project-reader.yaml');
+    await writeFile(parentPath, 'schemaVersion: 3\nid: project-reader\nextends: reader\ninstructions: Use the B rules.');
+    const target = { id: saved.id, cwd: 'other' };
+    const rpcCatalog = await f.controller.operation('catalog', target, f.actor);
+    const derivedB = rpcCatalog.agents.find(r => r.id === saved.id);
+    const candidates = await f.controller.operation('candidates', target, f.actor);
+    const modelPreview = await f.controller.operation('preview', target, f.actor);
+    assert.equal(candidates.revision, derivedB.revision);
+    assert.equal(modelPreview.agent.revision, derivedB.revision);
+    assert.equal(derivedB.instructions, 'Use the B rules.');
+    assert.equal(derivedB.parentSource, parentPath);
+    const preview = await f.controller.previewChange({id:saved.id, text, expectedRevision:f.store.getOverride(saved.id).revision}, actorB);
+    assert.deepEqual(preview.parent, {id:'project-reader',source:parentPath});
+    assert.equal(f.store.overrides().filter(row => row.id === saved.id).length, 1);
     const catalog = await f.controller.catalog(f.actor);
     assert.ok(catalog.agents.some(role => role.id === 'derived-reader'));
     await assert.rejects(f.controller.save({ id: 'project-reader', text: 'schemaVersion: 1\nid: project-reader\nextends: reader\n' }, f.actor), /owned by.*project-reader\.yaml/);
@@ -276,6 +300,48 @@ const assistant = value => turn('assistant/message', { message: { content: [{ ty
 const resultContext = events => ({ events: async () => events, status: () => undefined });
 const run = { id: 'r', childId: 'child', parentId: 'parent', roleId: 'reader', revision: 'rev', description: 'Read', createdAt: 1, phase: 'accepted' };
 
+test('large report fields stay recoverable within paged raw text', async () => {
+  const large = { ...report, summary: 's'.repeat(6400), evidence: ['a'.repeat(64000)], limitations: ['integration untested'], coverage: { files: 1 }, artifacts: ['one'] };
+  const query = resultContext([assistant(large), turn('turn/end', {reason: {kind: 'error', code: 'NATIVE_FAILURE', message: 'native failure ' + 'x'.repeat(6400)}})]);
+  const first = await readRunResult(query, run, 0, 100);
+  assert.ok(JSON.stringify(first).length < 2000);
+  assert.ok(first.limitations.includes('integration untested'));
+  assert.deepEqual(first.coverage, large.coverage);
+  assert.deepEqual(first.artifacts, large.artifacts);
+  assert.equal(first.nativeStop.code, 'NATIVE_FAILURE');
+  assert.match(first.nativeStop.message, /^native failure/);
+  assert.equal(first.nativeStop.source.event, 'turn/end');
+  assert.match(first.limitations.join(' '), /paged raw text/);
+  let page = first;
+  let raw = first.rawText;
+  while (page.nextOffset !== undefined) {
+    page = await readRunResult(query, run, page.nextOffset, 50000, first.resultRevision);
+    raw += page.rawText;
+    assert.deepEqual(page.evidence, []);
+  }
+  assert.deepEqual(JSON.parse(raw), large);
+});
+
+test('inherited disable requires consent and a global role cannot depend on a project-only parent', async () => {
+  const f = await fixture();
+  try {
+    await f.controller.save({ id: 'child-reader', text: 'schemaVersion: 3\nid: child-reader\nextends: reader' });
+    const change = { id: 'reader', text: 'schemaVersion: 3\nid: reader\nenabled: false' };
+    const preview = await f.controller.previewChange(change);
+    const impact = preview.impacts.find(row => row.id === 'child-reader');
+    assert.equal(impact.before.enabled, true);
+    assert.equal(impact.after.enabled, false);
+    await assert.rejects(f.controller.save({ ...change, impactRevision: preview.impactRevision }), /Confirm every indirect/);
+    const folder = join(f.directory, '.dsh', 'agentdeck');
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, 'project.yaml'), 'schemaVersion: 3\nid: project-base\nextends: reader');
+    const invalid = { id: 'global-reader', text: 'schemaVersion: 3\nid: global-reader\nextends: project-base' };
+    await assert.rejects(f.controller.previewChange(invalid), /Missing parent agent: project-base/);
+    await assert.rejects(f.controller.save(invalid), /Missing parent agent: project-base/);
+    assert.equal(f.store.getOverride('global-reader'), undefined);
+  } finally { await f.close(); }
+});
+
 test('latest cancelled or running turn cannot inherit an older completed report', async () => {
   const previous = [turn('turn/start'), assistant(report), turn('turn/end', { reason: { kind: 'completed' } })];
   const cancelled = await readRunResult(resultContext([...previous, turn('turn/start'), turn('turn/end', { reason: { kind: 'aborted' } })]), run);
@@ -394,5 +460,85 @@ test('preview cancellation rejects instead of disguising aborted model resolutio
   try {
     f.root.get('llm').resolveCallConfig = async () => { abort.abort(new Error('Preview cancelled')); throw abort.signal.reason; };
     await assert.rejects(f.controller.preview('reader', f.actor, abort.signal), /Preview cancelled/);
+  } finally { await f.close(); }
+});
+
+test('empty final assistant message cannot reuse a provisional completion report', async () => {
+  const events = [turn('turn/start'), assistant(report), turn('assistant/message', { message: { content: [] } }), turn('turn/end', { reason: { kind: 'completed' } })];
+  assert.equal((await readRunResult(resultContext(events), run)).status, 'finished-unverified');
+});
+
+test('model preview separates invalid parameters and unavailable metadata', async () => {
+  const f = await fixture();
+  try {
+    const models = f.controller.modelQueries;
+    const resolve = models.resolve;
+    models.resolve = async () => { throw Object.assign(Error('unsupported effort'), {code:'UNSUPPORTED_REASONING_EFFORT'}); };
+    const invalid = await f.controller.preview('reader', f.actor);
+    assert.equal(invalid.agent.available, false);
+    assert.equal(invalid.agent.validation, 'invalid');
+    assert.match(invalid.diagnostics.join(' '), /unsupported effort/);
+    models.resolve = resolve;
+    models.info = async () => { throw Error('offline'); };
+    const metadataOnly = await f.controller.preview('reader', f.actor);
+    assert.equal(metadataOnly.agent.validation, 'unverified');
+    models.resolve = async () => { throw Error('offline'); };
+    const unknown = await f.controller.preview('reader', f.actor);
+    assert.equal(unknown.agent.available, false);
+    assert.equal(unknown.agent.validation, 'unverified');
+    const reader = loadBuiltinAgents().find(role => role.id === 'reader');
+    assert.deepEqual(missingCapabilities(reader, [], {files:true,skills:true,meter:false,hostCompaction:true}), []);
+  } finally { await f.close(); }
+});
+
+test('history cursor survives new arrivals and stays within its parent', async () => {
+  const f = await fixture();
+  try {
+    const rows = Array.from({length:201}, (_, i) => ({ ...run, id: `r${i}`, childId: undefined, phase:'failed' }));
+    f.store.runs = () => rows;
+    const read = cursor => f.controller.operation('runs', {parentId:'parent',cursor});
+    const first = await read();
+    assert.equal(first.runs.length, 200);
+    rows.unshift({...rows[0], id:'new'});
+    const second = await read(first.nextCursor);
+    assert.deepEqual(second.runs.map(r=>r.id), ['r200']);
+    assert.equal(second.nextCursor, undefined);
+    await assert.rejects(f.controller.operation('runs',{parentId:'other',cursor:first.nextCursor}), /cursor/);
+  } finally { await f.close(); }
+});
+
+test('shared project-dependent definitions protect other known projects during edits', async () => {
+  const f = await fixture();
+  try {
+    const folder = join(f.directory, '.dsh', 'agentdeck');
+    await mkdir(folder, {recursive:true});
+    await writeFile(join(folder,'base.yaml'), 'id: project-base\nschemaVersion: 3\nextends: reader');
+    const text = 'id: local-reader\nschemaVersion: 3\nextends: project-base';
+    const saved = await f.controller.save({id:'local-reader',text}, f.actor);
+    const other = join(f.directory, 'other');
+    await mkdir(join(other,'.dsh','agentdeck','broken.yaml'), {recursive:true});
+    f.root.get('sessionQuery').listSessions = async () => [{header:{cwd:other}}];
+    await assert.rejects(f.controller.save({id:saved.id,expectedRevision:saved.revision,text:text+'\nenabled: false'}, f.actor), /unreadable role sources/);
+    await assert.rejects(f.controller.previewChange({id:'reader',text:'id: reader\nschemaVersion: 3\nenabled: false'},f.actor), /unreadable role sources/);
+    await mkdir(join(folder,'broken.yaml'));
+    await assert.rejects(f.controller.reset({id:saved.id,expectedRevision:saved.revision},f.actor), /unreadable role sources/);
+  } finally { await f.close(); }
+});
+
+test('save diagnostic names the same effective project source as the catalog', async () => {
+  const f = await fixture();
+  try {
+    const shared = join(f.directory,'shared');
+    const project = join(f.directory,'.dsh','agentdeck');
+    const text = 'schemaVersion: 3\nid: reader\nenabled: true';
+    for (const folder of [shared,project]) {
+      await mkdir(folder,{recursive:true});
+      await writeFile(join(folder,'reader.yaml'),text);
+    }
+    const controller = new AgentDeckController(f.root,f.store,{customAgentDirs:[shared]});
+    const catalog = await controller.catalog(f.actor);
+    const source = catalog.agents.find(role => role.id === 'reader').source;
+    assert.equal(source,join(project,'reader.yaml'));
+    await assert.rejects(controller.save({id:'reader',text},f.actor), error => error.message.includes('owned by ' + source + '.'));
   } finally { await f.close(); }
 });

@@ -2,6 +2,14 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.3.1 — Task and project reliability
+
+- Resolve saved role definitions and their parents against the target project's configuration. Use the same working directory for discovery, preview and startup, and show the effective configuration source in the management page.
+- Preview inherited changes before saving. Require confirmation for changes that affect execution and keep uncertain reset results tied to the project used for the preview.
+- Distinguish model validation from temporary lookup failures and check the dependencies of the selected compaction service. Record failures before native dispatch separately from uncertain startup outcomes.
+- Read completion claims from the latest assistant message and retain native stop diagnostics. Add pagination for task history and long attachment lines, and bound the details returned with result pages.
+- Correct CSV missing-value counts, literal Markdown heading hashes and repository inventory truncation indicators.
+
 ## 0.3.0 — DSH compatibility boundaries
 
 - Support DSH >=0.2.2-rc.1 through one artifact and public host-selected task, Session and model adapters. Keep native caller identity, authorization, cancellation and completion.

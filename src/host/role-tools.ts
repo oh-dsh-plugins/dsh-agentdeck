@@ -118,6 +118,7 @@ export function registerRoleTools(ctx: HostContext, agent: RuntimeAgent, snapsho
       name: 'agentdeck_read_attachment',
       description: 'Read a bounded line range from a UTF-8 file attached to this Agent’s conversation.',
       parameters: {
+        column: { type: 'integer', description: 'First UTF-16 character position on the starting line (1-based). Resume with the returned next offset and column.' },
         attachment_id: { type: 'string', required: true, description: 'Durable attachment id present in this conversation.' },
         offset: { type: 'integer', description: 'First line, starting at 1; defaults to 1.' },
         limit: { type: 'integer', description: 'Number of lines, from 1 to 200; defaults to 100. Files are limited to 1 MiB.' },
@@ -142,8 +143,21 @@ export function registerRoleTools(ctx: HostContext, agent: RuntimeAgent, snapsho
         const bytes = Buffer.concat(chunks);
         if (bytes.includes(0)) throw new Error('Binary attachment requires an appropriate document reader.');
         const lines = new TextDecoder('utf-8', { fatal: true }).decode(bytes).split(/\r?\n/);
-        const excerpt = lines.slice(offset - 1, offset - 1 + limit).join('\n');
-        return { attachmentId: ref.attachmentId, name: capped(String(ref.name), 256), offset, totalLines: lines.length, text: capped(excerpt), truncated: offset - 1 + limit < lines.length || excerpt.length > MAX_OUTPUT };
+        const column = integer(args.column, 1, MAX_FILE + 1);
+        if (column > (lines[offset - 1]?.length ?? 0) + 1) throw new Error('Attachment column exceeds the line length.');
+        const selected = lines.slice(offset - 1, offset - 1 + limit);
+        if (selected.length) selected[0] = selected[0].slice(column - 1);
+        const excerpt = selected.join('\n');
+        let end = Math.min(MAX_OUTPUT, excerpt.length);
+        // Keep both UTF-16 code units of a supplementary character on the same page.
+        if (end < excerpt.length && /[\uDC00-\uDFFF]/.test(excerpt[end])) end--;
+        const text = excerpt.slice(0, end);
+        let next: { offset: number; column: number } | undefined;
+        if (text.length < excerpt.length) {
+          const pieces = text.split('\n');
+          next = { offset: offset + pieces.length - 1, column: pieces.at(-1)!.length + (pieces.length === 1 ? column : 1) };
+        } else if (offset - 1 + selected.length < lines.length) next = { offset: offset + selected.length, column: 1 };
+        return { attachmentId: ref.attachmentId, name: capped(String(ref.name), 256), offset, totalLines: lines.length, text, truncated: !!next, ...(next ? { next } : {}) };
       },
     })));
     if (snapshot.role.capabilities.includes('project-runner') && snapshot.role.scripts.includes(PROJECT_HELPER)) disposers.push(ctx.tools.register(defineTool({

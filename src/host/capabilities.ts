@@ -22,7 +22,11 @@ export function toolAllowed(name: string, capabilities: readonly string[], suppo
   return false;
 }
 
-export interface CapabilityEnvironment { files: boolean; runner: boolean; skills: boolean; meter: boolean; web?: boolean }
+export function usesBasicCompaction(policyVersion: 1 | 2, hostCompaction: boolean): boolean {
+  return policyVersion === 1 || !hostCompaction;
+}
+
+export interface CapabilityEnvironment { files: boolean; runner: boolean; skills: boolean; meter: boolean; hostCompaction?: boolean; web?: boolean }
 /** File tools come from the independent child preset; external tools must be global. */
 export function missingCapabilities(role: AgentDefinition, globalNames: readonly string[], environment?: CapabilityEnvironment): string[] {
   const env = environment ?? { files: globalNames.includes('read'), runner: globalNames.includes('agentdeck_run_project_script'), skills: true, meter: true };
@@ -39,6 +43,6 @@ export function missingCapabilities(role: AgentDefinition, globalNames: readonly
     if (!available) missing.push(capability);
   }
   if (role.skills.length && !env.skills) missing.push('native-skills');
-  if (!env.meter) missing.push('native-token-meter');
+  if (!env.meter && usesBasicCompaction(2, !!env.hostCompaction)) missing.push('native-token-meter');
   return missing;
 }

@@ -28,7 +28,7 @@ function main() {
       continue;
     }
     if (fence) continue;
-    const atx = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    const atx = line.match(/^ {0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/);
     if (atx) headings.push({ line: index + 1, level: atx[1].length, title: atx[2] });
     else if (index > 0 && /^ {0,3}(?:=+|-+)\s*$/.test(line) && lines[index - 1].trim()
       && !/^\s*(?:#|>|[-*+]\s)/.test(lines[index - 1])) {

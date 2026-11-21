@@ -24,7 +24,7 @@ export async function readRunResult(queries: ResultQueries, run: RunRecord, offs
     if (event.type === 'turn/start') { rawText = ''; nativeStop = undefined; ended = false; turnIdentity = [event.seq, event.data.turn]; }
     if (event.type === 'assistant/message') {
       const value = text(record(event.data.message) ? event.data.message.content : undefined);
-      if (value) rawText = value;
+      rawText = value;
       if (record(event.data.usage)) for (const key of Object.keys(usage) as (keyof typeof usage)[]) {
         const value = event.data.usage[key];
         if (typeof value === 'number' && Number.isFinite(value)) usage[key] = (usage[key] ?? 0) + value;
@@ -48,11 +48,36 @@ export async function readRunResult(queries: ResultQueries, run: RunRecord, offs
   if (offset > 0 && expectedRevision !== resultRevision) throw new ResultRevisionError();
   const start = Math.floor(offset);
   const end = Math.min(rawText.length, start + Math.min(50_000, Math.floor(limit)));
+  // Keep the structured preview bounded independently of the raw-text cursor.
+  // The complete report (including oversized fields) remains available in rawText pages.
+  const preview = { evidence: items(report?.evidence), coverage: report?.coverage ?? null,
+    artifacts: items(report?.artifacts), limitations: items(report?.limitations) };
+  const budget = Math.min(4000, Math.max(256, limit));
+  const details = { evidence: [] as unknown[], coverage: null as unknown, artifacts: [] as unknown[], limitations: [] as unknown[] };
+  let remaining = budget;
+  const omitted: string[] = [];
+  for (const key of ['limitations', 'coverage', 'artifacts', 'evidence'] as const) {
+    const size = JSON.stringify(preview[key]).length;
+    if (size <= remaining) {
+      Object.assign(details, { [key]: preview[key] });
+      remaining -= size;
+    } else omitted.push(key);
+  }
+  if (omitted.length) details.limitations.push(`Large fields in the paged raw text: ${omitted.join(', ')}.`);
+  if (!validStatus && report?.limitations === undefined) details.limitations.push('Final answer is not a validated AgentDeck completion report. Inspect the evidence before accepting completion.');
+  let stop = nativeStop ?? null;
+  if (record(nativeStop) && JSON.stringify(nativeStop).length > budget) {
+    const cause = record(nativeStop.error) ? nativeStop.error : nativeStop;
+    const message = cause.message ?? nativeStop.message ?? nativeStop.error;
+    stop = { kind: typeof terminal === 'string' ? terminal.slice(0, 100) : 'unknown', truncated: true,
+      code: typeof cause.code === 'string' ? cause.code.slice(0, 100) : typeof cause.code === 'number' ? cause.code : undefined,
+      message: (typeof message === 'string' ? message : JSON.stringify(nativeStop)).slice(0, budget),
+      source: { sessionId: run.childId, event: 'turn/end', turn: turnIdentity?.[1] } };
+  } else if (typeof stop === 'string') stop = stop.slice(0, budget);
   return {
-    childId: run.childId, status, summary: typeof report?.summary === 'string' ? report.summary : rawText.slice(0, 2000),
-    evidence: items(report?.evidence), coverage: report?.coverage ?? null, artifacts: items(report?.artifacts),
-    limitations: [...(report?.limitations === undefined ? validStatus ? [] : ['Final answer is not a validated AgentDeck completion report. Inspect the evidence before accepting completion.'] : items(report.limitations)), ...diagnostics],
+    childId: run.childId, status, summary: (typeof report?.summary === 'string' ? report.summary : rawText).slice(0, Math.min(2000, budget)),
+    ...details, limitations: [...details.limitations, ...diagnostics],
     diagnostics, resultRevision, rawText: rawText.slice(start, end), totalCharacters: rawText.length,
-    ...(end < rawText.length ? { nextOffset: end } : {}), usage: Object.values(usage).some(value => value !== null) ? usage : null, nativeStop: nativeStop ?? null,
+    ...(end < rawText.length ? { nextOffset: end } : {}), usage: Object.values(usage).some(value => value !== null) ? usage : null, nativeStop: stop,
   };
 }

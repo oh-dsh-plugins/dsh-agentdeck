@@ -78,11 +78,10 @@ export class RoleCatalogs {
     return cwd ? resolve(cwd) : undefined;
   }
 
-  async read(agent?: RuntimeAgent): Promise<RoleCatalog> {
+  async read(agent?: RuntimeAgent, project = this.projectRoot(agent)): Promise<RoleCatalog & { project?: string }> {
     const user = this.userLayers();
-    const project = this.projectRoot(agent);
     const layers = await Promise.all([...this.sharedDirectories, ...(project ? [join(project, this.projectDirectory)] : [])].map(readLayers));
-    return catalogFrom([...user, ...layers.flat()]);
+    return { ...catalogFrom([...user, ...layers.flat()]), project };
   }
 
   async forWrite(actor?: RuntimeAgent, signal?: AbortSignal): Promise<ConfigurationSnapshot> {

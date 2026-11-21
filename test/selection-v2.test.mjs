@@ -385,7 +385,11 @@ test('owner saves and resets preserve other resolved roles inside the write queu
     assert.equal(f.store.getOverride('custom-base').revision, base.revision);
     await assert.rejects(save('custom-base', { extends: 'reader', ...autoPatch() }, base.revision), /invalidates derived agents: custom-child/);
     assert.equal(f.store.getOverride('custom-base').revision, base.revision);
-    const updated = await save('custom-base', { extends: 'reader', displayName: 'Updated base' }, base.revision);
+    const rename = { id: 'custom-base', text: text('custom-base', { extends: 'reader', displayName: 'Updated base' }), expectedRevision: base.revision };
+    const preview = await f.controller.previewChange(rename, f.actor);
+    assert.deepEqual(preview.impacts.map(row => row.id), ['custom-child']);
+    assert.equal(preview.impacts[0].requiresAcceptance, false);
+    const updated = await f.controller.save(rename, f.actor);
     await reset('custom-child', child.revision);
     await reset('custom-base', updated.revision);
     assert.equal(f.store.getOverride('custom-base'), undefined);

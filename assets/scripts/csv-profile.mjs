@@ -6,7 +6,12 @@ function parseCsv(source) {
   const rows = [];
   let row = [], field = '', quoted = false, closed = false;
   const finishField = () => { row.push(field); field = ''; closed = false; };
-  const finishRow = () => { finishField(); if (row.length > 1 || row[0] !== '') rows.push(row); row = []; };
+  const finishRow = () => {
+    const blankLine = !row.length && !field.length && !closed;
+    finishField();
+    if (!blankLine) rows.push(row);
+    row = [];
+  };
   for (let index = 0; index < source.length; index++) {
     const char = source[index];
     if (quoted) {

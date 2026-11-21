@@ -31,8 +31,8 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
     description: 'Discover ready-to-use AgentDeck scene agents, their actual model options, native recovery and task records. Use general when no specialist fits. Availability includes the saved default route authorization for this Session; unknown is not approval. Read details only when needed; simple known-file work can use tools directly. Use candidates for the selected auto role to read its compact pool and revision. Role configuration is read-only through this tool. Use the owner management page to save or reset.',
     parameters: {
       action: { type: 'string', enum: ['list', 'get', 'models', 'preview', 'candidates', 'runs', 'save', 'reset'] },
-      id: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' },
-      candidateId: { type: 'string' }, revision: { type: 'string' },
+      id: { type: 'string' }, cwd: { type: 'string', description: 'Target project directory for list, get, preview or candidates. Use the same cwd for start.' }, provider: { type: 'string' }, model: { type: 'string' },
+      candidateId: { type: 'string' }, revision: { type: 'string' }, cursor: { type: 'string' },
     }, output,
     isConcurrencySafe: () => true,
     async execute(input: any, exec: ToolRunContext) {
@@ -42,23 +42,23 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
       let result: JsonObject;
       switch (args.action ?? 'list') {
         case 'list': {
-          const catalog = await controller.catalog(actor, exec.signal);
+          const catalog = await controller.catalog(actor, exec.signal, args.cwd);
           result = { agents: catalog.agents.map((agent: any) => ({ id: agent.id, title: agent.title, description: agent.description, enabled: agent.enabled, available: agent.available, capabilitiesAvailable: agent.capabilitiesAvailable,
               authorization: { status: agent.authorization.status, ...(agent.authorization.code ? { code: agent.authorization.code, policy: agent.authorization.policy } : {}) },
               ...(agent.configuredSelection ? { configuredSelection: { provider: agent.configuredSelection.provider, model: agent.configuredSelection.model } } : {}), missingCapabilities: agent.missingCapabilities, unverifiedCapabilities: agent.unverifiedCapabilities, capabilityCheck: agent.capabilityCheck, modelMode: agent.model.mode, revision: agent.revision })), diagnostics: catalog.diagnostics };
           break;
         }
         case 'get': {
-          const catalog = await controller.catalog(actor, exec.signal);
+          const catalog = await controller.catalog(actor, exec.signal, args.cwd);
           const selected = catalog.agents.find((agent: any) => agent.id === args.id);
           if (!selected) throw new Error('Unknown or invalid role id. Query list before selecting a role.');
-          result = { agent: selected, override: store.getOverride(selected.id) ?? null };
+          result = { agent: selected, override: catalog.overrides.find((row: { id: string }) => row.id === selected.id) ?? null };
           break;
         }
         case 'models': result = await controller.models(actor, args, exec.signal); break;
         case 'preview': result = await controller.preview(requiredString(args.id, 'id'), actor, exec.signal, args); break;
-        case 'candidates': result = await controller.candidates(requiredString(args.id, 'id'), actor, exec.signal); break;
-        case 'runs': result = await controller.runs(actor, exec.signal); break;
+        case 'candidates': result = await controller.candidates(requiredString(args.id, 'id'), actor, exec.signal, args.cwd); break;
+        case 'runs': result = await controller.runs(actor, exec.signal, undefined, optionalString(args.cursor, 'cursor')); break;
         case 'save':
         case 'reset': throw new Error('AGENTDECK_OWNER_CONFIGURATION_REQUIRED: Save or reset roles on the owner management page.');
         default: throw new Error('Unknown catalog action.');
