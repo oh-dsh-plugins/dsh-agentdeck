@@ -4,7 +4,7 @@ This installed plugin uses the public Connection RPC carrier. When connection an
 
 ## Client integration
 
-The client is one self-contained window.__ModuleLoader__ factory in src/client/index.js. It uses the host React, settings.section slot, theme tokens, locale and Connection RPC; it does not create an alternate application root. Reads have abort propagation and a 15-second deadline; suggestion generation has a 120-second deadline. Save/reset have no automatic deadline or replay. Unmount and superseded requests cancel reads while retaining drafts. Session selection is optional and supplies execution authorization context only.
+The client is one self-contained window.__ModuleLoader__ factory in src/client/index.js. It uses the host React, settings.section slot, theme tokens, locale and Connection RPC; it does not create an alternate application root. Reads have abort propagation and a 15-second deadline; suggestion generation has a 120-second deadline. Save/reset have no automatic deadline or replay. Unmount and superseded requests cancel reads while retaining drafts. Session selection is optional and supplies execution authorization context only. The global view marks this as no Session selected. Selecting a live Session loads its model authorization. Role preview checks dynamic capability readiness separately, and the child verifies its actual tools before use.
 
 ## Role editing and AI suggestions
 
@@ -46,6 +46,8 @@ Existing owner previewChange validates schemaVersion 3/model/reasoning actions a
 Runtime catalog/start/control/result stay on native DSH delegation. Policy, caller identity, cancellation, leaf restrictions, persistence, completion delivery and Team coexistence remain native. Task controls are restricted to the direct parent's children. Inactivity does not establish success. Control continues or interrupts the existing child; it does not silently create a replacement.
 
 New policyVersion 2 snapshots pin role/skills/model revisions without plugin output or input quotas. They inherit the host's native compaction service. Historical policyVersion 1 snapshots restore their frozen limits and isolated compaction. Native pre-request pressure and standard provider-overflow recovery may compact historical messages and retry the current request after a durable reduction. Completed tools are not replayed. Irreducible fixed input can still fail. Native max-tokens ends as partial with retained text and supports continuation in the same child.
+
+Result text marked `provisionalText` is the latest nonblank output from the current turn when there is no final result text. Messages containing tool calls are provisional. The final result text and the native stop reason determine structured evidence and business status. When `nativeStopTruncated` is set, request `agentdeck.result {childId,section:'nativeStop',resultRevision,offset?,limit?}` to read the complete saved stop reason as paged JSON. Use that section's `nextOffset` for its subsequent pages. Both sections share the report revision.
 
 ## Verification boundary
 

@@ -26,9 +26,9 @@ AgentDeck 不增加分类模型或独立执行循环。配置了某项能力或�
 
 | 组件 | 支持基线 |
 | --- | --- |
-| AgentDeck | `0.3.1` |
-| DeepSeek Harness | **`>=0.2.2-rc.1`**；已发布宿主验证覆盖 `rc.1` 至 `rc.5`，未来版本须通过相同行为验收 |
-| Node.js | `>=24.9.0` |
+| AgentDeck | `0.3.2` |
+| DeepSeek Harness（源码构建） | 精确版本门禁覆盖 `0.2.2-rc.1` 至 `rc.5`，以及 `0.2.3-alpha.2` |
+| Node.js | 插件最低 `24.9.0`。DSH `0.2.3-alpha.2` 要求 `^24.22.3 || >=26.13.1`。 |
 | 开发环境 | `PATH` 中可找到 DSH CLI；宿主依赖链接脚本使用 POSIX shell |
 | 可选能力 | 已有网页服务、原生工具或受支持的浏览器集成 |
 
@@ -36,21 +36,31 @@ DSH 提供自身的同伴依赖（peer dependencies）。不要为了满足本�
 
 ## 安装
 
-将 npm 上的发行版本安装到兼容的 DSH 配置档：
+发布前进行本地验收时，请把[从源码构建](#从源码构建)得到的安装包装进测试配置档。用文件路径指定要测试的包。
+
+此版本发布后，可从 npm 安装。
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.3.1
+dsh plugin --profile web add dsh-agentdeck@0.3.2
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。DSH 插件管理器负责安装软件包并应用原生组合补丁。管理器提示需要重启时，重启 DSH，再刷新已有 Harness 页面。
 
+### 将 DSH 从 RC 升级到 Alpha
+
+1. 等待 RC 上的任务结束，暂停新任务。在 RC 上安装本地 AgentDeck 包。
+2. 重启同一个 RC Web 配置档，先别打开原来的父会话。直接进入 **AgentDeck → 诊断 → 记录 DSH 升级所需的任务目录**。如有待处理项，在 RC 上处理后再次重启并记录。只停止会话的运行，原会话仍可能留在内存中。
+3. 等记录结果显示待处理项为零，保持原会话未打开并关闭 RC。保留配置档和会话存储的隔离副本，以及会话引用的工作区路径，再用 Alpha 打开工作配置档。
+
+Alpha 的新子任务继承调用会话的工作区。要在其他目录委派，请选择已在目标目录的会话。显式选择模型时，以 DSH 当前宿主设置为准。RC 旧任务仅在记录与 Alpha 的实际工作区一致时才会续跑。遇到暂停的旧任务，从升级前的隔离 RC 副本及原工作区恢复。Alpha 写入的工作区事件无法由旧版 DSH 读取，请另外保留升级后的数据。
+
 ### GitHub Release 安装包
 
-从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.3.1.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
+从 [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest) 下载 `dsh-agentdeck-0.3.2.tgz` 和 `SHA256SUMS`。`.tgz` 附件是包含编译后运行文件的 npm 安装包；GitHub 自动生成的源码压缩包不包含这些构建结果。
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.3.1.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.3.2.tgz
 ```
 
 ### 从源码构建
@@ -65,7 +75,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.3.1.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.3.2.tgz
 ```
 
 使用其他配置档（profile）时，将 `web` 替换为实际名称。`dev:link-host` 查找已安装的 DSH CLI，并将其现有公开同伴依赖链接到当前项目，不修改宿主或活动配置档。CLI 位于其他位置时，可通过 `AGENTDECK_DSH_ROOT` 指定已安装的 DSH 包目录。

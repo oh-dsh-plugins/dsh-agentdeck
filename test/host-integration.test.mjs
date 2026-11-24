@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -17,7 +17,7 @@ import { LlmError } from '@deepseek-ai/dsh-llm';
 import * as AgentDeck from '../lib/index.js';
 import { textRevision } from '../lib/host/store.js';
 import {
-  CHILD_TEXT, ROUTE, bounded, createNativeHarness, deferred, noticeMessages,
+  CHILD_TEXT, ROUTE, bounded, createNativeHarness, deferred, liveHost, noticeMessages,
 } from '../scripts/probe-native.mjs';
 
 import { fixture, text, success, ownerSave, start } from '../scripts/fixture-host.mjs';
@@ -84,6 +84,9 @@ test('actual Host entry, JSON domain and native preset start one guarded child w
     assert.match(text(missing), /revision.*first page/i);
     const second = success(await f.call('scene_agent_result', { childId: child.id, offset, resultRevision: first.resultRevision }));
     assert.equal(first.rawText + second.rawText, result.rawText);
+    const stop = success(await f.call('scene_agent_result', { childId: child.id, section: 'nativeStop', resultRevision: result.resultRevision }));
+    assert.deepEqual(JSON.parse(stop.rawText), result.nativeStop);
+    assert.equal(stop.resultRevision, result.resultRevision);
   } finally { await f.close(); }
 });
 
@@ -207,7 +210,7 @@ test('Host rejects unauthorized explicit routes and unknown roles before accepti
     assert.match(text(denied), /not authorized by this Session/);
     assert.match(text(denied), /No child was started/);
     assert.match(text(denied), /Allowed explicit routes:/);
-    assert.match(text(denied), /create a new Session/);
+    assert.match(text(denied), liveHost ? /current native model selection settings/ : /create a new Session/);
     const explicit = await start(f, { provider: ROUTE.provider, model: 'also-forbidden' });
     assert.equal(explicit.isError, true);
     assert.match(text(explicit), /also-forbidden.*not authorized/);
@@ -219,25 +222,36 @@ test('Host rejects unauthorized explicit routes and unknown roles before accepti
   } finally { await f.close(); }
 });
 
-test('native capacity exhaustion through the Host does not duplicate an uncertain startup', async () => {
+test('native capacity exhaustion preserves final feedback and records a proven refusal', async () => {
   const f = await fixture({ holdChild: true });
+  const feedback = 'Native capacity policy: wait for an existing child to finish before retrying.';
+  const unbind = f.h.parent.ctx.on('tools/post-execute', async (execution, result, next) => {
+    if (execution.name.startsWith('agentdeck_native_') && result.isError && result.error.info?.code === 'ACTIVATION_LIMIT_REACHED') {
+      return { kind: 'block', feedback: [{ type: 'text', text: feedback }] };
+    }
+    return next();
+  });
   try {
     for (let index = 0; index < 8; index++) success(await start(f, { prompt: `Read bounded evidence unit ${index}.` }));
     assert.equal(f.h.starts.length, 8);
     const rejectedId = `capacity-reject-${++serial}`;
     const overflow = await start(f, {}, { id: rejectedId });
     assert.equal(overflow.isError, true);
-    assert.match(text(overflow), /capacity|active subagents|limit|pool/i);
+    assert.ok(text(overflow).includes(feedback), text(overflow));
+    assert.doesNotMatch(text(overflow), /subagent limit reached/i);
     assert.equal(f.h.starts.length, 8);
     const retry = await start(f, {}, { id: rejectedId });
     assert.equal(retry.isError, true);
-    assert.match(text(retry), /Previous startup.*uncertain/);
+    assert.match(text(retry), /Previous startup.*failed/);
+    const refusals = [...f.domain().table('runs').entries()].map(([, run]) => run).filter(run => run.phase === 'failed');
+    assert.equal(refusals.length, 1);
+    assert.equal(refusals[0].childId, undefined);
     assert.equal(f.h.starts.length, 8);
     f.h.adapter.childGate.resolve();
     await f.h.waitForSettlement();
     assert.equal(f.h.ends.length, 8);
     assert.equal(noticeMessages(f.h).length, 8);
-  } finally { await f.close(); }
+  } finally { unbind(); await f.close(); }
 });
 
 test('legacy model configuration actions return owner migration guidance without writing', async () => {
@@ -792,10 +806,237 @@ test('explicit relative child cwd selects the target project role before native 
     const folder = join(target, '.dsh', 'agentdeck');
     await mkdir(folder, { recursive: true });
     await writeFile(join(folder, 'local.yaml'), 'schemaVersion: 3\nid: target-reader\nextends: reader\ninstructions: Read with project B rules.');
+    if (liveHost) {
+      for (const result of [
+        await f.call('scene_agent_catalog', { action: 'candidates', id: 'target-reader', cwd: 'project-b' }),
+        await start(f, { role: 'target-reader', cwd: 'project-b' }),
+      ]) {
+        assert.equal(result.isError, true);
+        assert.match(text(result), /AGENTDECK_WORKSPACE_MISMATCH/);
+      }
+      assert.equal(f.h.starts.length, 0);
+      return;
+    }
     const choice = success(await f.call('scene_agent_catalog', {action:'candidates', id:'target-reader', cwd:'project-b'}));
     const run = success(await start(f, { role:'target-reader', cwd:'project-b', revision:choice.revision }));
     const snapshot = f.domain().table('snapshots').get(run.revision);
     assert.equal(snapshot.role.instructions, 'Read with project B rules.');
     assert.equal(f.ctx.get('workingDirectory').get(f.ctx.agents.get(run.childId).session), target);
+  } finally { await f.close(); }
+});
+
+test('Alpha accepts a legacy parent workspace alias and rejects retargeting during activation', async () => {
+  if (!liveHost) return;
+  let retarget;
+  let handle;
+  const f = await fixture({ async beforeActivation() { await retarget?.(); } });
+  try {
+    const project = join(f.h.storageRoot, 'actual-project');
+    const other = join(f.h.storageRoot, 'other-project');
+    const alias = join(f.h.storageRoot, 'legacy-path');
+    await mkdir(project);
+    await mkdir(other);
+    await symlink(project, alias, 'dir');
+    handle = await f.ctx.get('agents').create({ sessionId: 'legacy-alias-parent', meta: { cwd: alias }, agentOptions: ROUTE });
+    const parent = handle.agent;
+    assert.equal(parent.session.header.cwd, alias);
+    const run = success(await start(f, { cwd: '.' }, { agent: parent }));
+    assert.equal(f.domain().table('snapshots').get(run.revision).expectedWorkspace, project);
+    assert.equal(f.ctx.get('workingDirectory').get(f.ctx.agents.get(run.childId).session), project);
+    await bounded(f.ctx.subagents.waitForTreeWork(parent), 'legacy alias parent tree settlement');
+    await bounded(parent.whenIdle(), 'legacy alias parent completion notice');
+    const childRequests = () => f.h.adapter.requests.filter(request => request.sessionId !== parent.id).map(request => request.sessionId);
+    const completedRequests = childRequests();
+    assert.ok(completedRequests.includes(run.childId));
+    retarget = async () => { await unlink(alias); await symlink(other, alias, 'dir'); };
+    const mismatch = await start(f, {}, { agent: parent });
+    assert.equal(mismatch.isError, true);
+    assert.match(text(mismatch), /AGENTDECK_WORKSPACE_MISMATCH/);
+    assert.equal(f.h.starts.length, 1);
+    assert.deepEqual(childRequests(), completedRequests);
+  } finally {
+    try { await handle?.dispose(); } finally { await f.close(); }
+  }
+});
+
+test('Alpha reads project roles from the verified workspace even when its alias shifts temporarily', async t => {
+  if (!liveHost) return;
+  let restoreAlias;
+  let handle;
+  const f = await fixture({ holdChild: true, async beforeActivation() { await restoreAlias(); } });
+  try {
+    const project = join(f.h.storageRoot, 'project-a');
+    const other = join(f.h.storageRoot, 'project-b');
+    const alias = join(f.h.storageRoot, 'legacy-alias');
+    for (const [root, label] of [[project, 'A'], [other, 'B']]) {
+      const config = join(root, '.dsh', 'agentdeck');
+      await mkdir(config, { recursive: true });
+      await writeFile(join(config, 'role.yaml'), `schemaVersion: 3\nid: workspace-reader\nextends: reader\ninstructions: Workspace ${label} instructions.\n`);
+    }
+    await symlink(project, alias, 'dir');
+    handle = await f.ctx.get('agents').create({ sessionId: 'temporary-workspace-alias', meta: { cwd: alias }, agentOptions: ROUTE });
+    let shifted = false;
+    restoreAlias = async () => {
+      assert.equal(shifted, true, 'the alias must shift after validation and before activation');
+      await unlink(alias);
+      await symlink(project, alias, 'dir');
+    };
+    const fs = f.ctx.get('fs');
+    const nativeResolve = fs.resolve.bind(fs);
+    t.mock.method(fs, 'resolve', async (path, options) => {
+      const target = await nativeResolve(path, options);
+      if (!shifted && path === project && options?.cwd === alias) {
+        await unlink(alias);
+        await symlink(other, alias, 'dir');
+        shifted = true;
+      }
+      return target;
+    });
+    const run = success(await start(f, { role: 'workspace-reader' }, { agent: handle.agent }));
+    const snapshot = f.domain().table('snapshots').get(run.revision);
+    assert.equal(snapshot.expectedWorkspace, project);
+    assert.equal(f.ctx.get('workingDirectory').get(f.ctx.agents.get(run.childId).session), project);
+    assert.equal(snapshot.role.instructions, 'Workspace A instructions.');
+  } finally {
+    try { await handle?.dispose(); } finally { await f.close(); }
+  }
+});
+
+test('Alpha rejects a parent workspace change between role selection and native activation', async () => {
+  if (!liveHost) return; // RC passes the pinned path to native startup.
+  const f = await fixture({ async beforeActivation(spec, ctx) {
+    const moved = join(ctx.get('workingDirectory').get(spec.parent.session), 'project-b');
+    await ctx.get('workingDirectory').set(spec.parent, moved, spec.signal);
+  } });
+  try {
+    await mkdir(join(f.h.storageRoot, 'project-b'));
+    const attempt = await start(f);
+    assert.equal(attempt.isError, true);
+    assert.match(text(attempt), /AGENTDECK_WORKSPACE_MISMATCH/);
+    assert.equal(f.h.starts.length, 0);
+    assert.equal(f.h.adapter.requests.length, 0);
+  } finally { await f.close(); }
+});
+
+test('Alpha file calls cannot fall back to a different directory after a child starts', async () => {
+  if (!liveHost) return; // RC allows the native recovery behavior.
+  const f = await fixture({ holdChild: true });
+  try {
+    const workspace = join(f.h.storageRoot, 'project-b');
+    const signal = new AbortController().signal;
+    const directories = f.ctx.get('workingDirectory');
+    await mkdir(workspace);
+    await writeFile(join(f.h.storageRoot, 'root-only.txt'), 'fallback sentinel');
+    await directories.set(f.h.parent, workspace, signal);
+    const run = success(await start(f));
+    await bounded(f.h.adapter.childStarted.promise, 'guarded first model request');
+    const child = f.ctx.agents.get(run.childId);
+    await rmdir(workspace);
+    const read = await f.call('read', { file_path: 'root-only.txt' }, { agent: child });
+    assert.equal(read.isError, true);
+    assert.match(text(read), /AGENTDECK_WORKSPACE_UNVERIFIED/);
+    assert.doesNotMatch(text(read), /fallback sentinel/);
+    assert.equal(directories.get(child.session), workspace);
+  } finally { await f.close(); }
+});
+
+test('Alpha preserves a child workspace when it disappears during native access', async t => {
+  if (!liveHost) return;
+  const f = await fixture({ holdChild: true });
+  try {
+    const workspace = join(f.h.storageRoot, 'project-b');
+    const signal = new AbortController().signal;
+    const directories = f.ctx.get('workingDirectory');
+    const fs = f.ctx.get('fs');
+    await mkdir(workspace);
+    await writeFile(join(f.h.storageRoot, 'root-only.txt'), 'fallback sentinel');
+    await directories.set(f.h.parent, workspace, signal);
+    const run = success(await start(f));
+    await bounded(f.h.adapter.childStarted.promise, 'guarded first model request');
+    const child = f.ctx.agents.get(run.childId);
+    assert.equal(child.session.header.cwd, f.h.storageRoot);
+    const nativeStat = fs.stat.bind(fs);
+    const removeDuringStat = t.mock.method(fs, 'stat', async (target, control) => {
+      const result = await nativeStat(target, control);
+      if (fs.processPath(target) === workspace && result?.type === 'directory') {
+        await rmdir(workspace);
+        removeDuringStat.mock.restore();
+      }
+      return result;
+    });
+    const blocked = await f.call('read', { file_path: 'root-only.txt' }, { agent: child });
+    assert.equal(blocked.isError, true);
+    assert.doesNotMatch(text(blocked), /fallback sentinel/);
+    assert.equal(removeDuringStat.mock.callCount(), 1);
+    assert.equal(directories.get(child.session), workspace, 'a failed access must not commit a different root');
+    await mkdir(workspace);
+    await writeFile(join(workspace, 'restored.txt'), 'original workspace restored');
+    const read = await f.call('read', { file_path: 'restored.txt' }, { agent: child });
+    assert.equal(read.isError, false, text(read));
+    assert.match(text(read), /original workspace restored/);
+    f.h.adapter.childGate.resolve();
+    await f.h.waitForSettlement();
+    success(await f.call('scene_agent_control', { action: 'continue', childId: run.childId, message: 'Continue in the restored workspace.' }));
+    await f.h.waitForSettlement();
+  } finally { await f.close(); }
+});
+
+test('relative startup recovers a missing parent cwd before selecting the project role', async () => {
+  const f = await fixture();
+  try {
+    const directories = f.ctx.get('workingDirectory');
+    const removed = join(f.h.storageRoot, 'removed-project');
+    const target = join(f.h.storageRoot, 'project-b');
+    const folder = join(target, '.dsh', 'agentdeck');
+    await mkdir(removed);
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, 'local.yaml'), 'schemaVersion: 3\nid: recovered-reader\nextends: reader');
+    await directories.set(f.h.parent, removed, new AbortController().signal);
+    await rmdir(removed);
+    assert.equal(directories.get(f.h.parent.session), removed);
+    const choice = await f.call('scene_agent_catalog', { action: 'candidates', id: 'recovered-reader', cwd: 'project-b' });
+    assert.equal(directories.get(f.h.parent.session), removed);
+    if (liveHost) {
+      assert.equal(choice.isError, true);
+      assert.match(text(choice), /AGENTDECK_WORKSPACE_MISMATCH/);
+      const result = await start(f, { role: 'recovered-reader', cwd: 'project-b' });
+      assert.equal(result.isError, true);
+      assert.match(text(result), /AGENTDECK_WORKSPACE_MISMATCH/);
+      assert.equal(f.h.starts.length, 0);
+      return;
+    }
+    const candidates = success(choice);
+    const run = success(await start(f, { role: 'recovered-reader', cwd: 'project-b', revision: candidates.revision }));
+    assert.equal(directories.get(f.h.parent.session), f.h.storageRoot);
+    assert.equal(directories.get(f.ctx.agents.get(run.childId).session), target);
+  } finally { await f.close(); }
+});
+
+test('startup with no cwd recovers the parent directory before selecting the project role', async () => {
+  const f = await fixture();
+  try {
+    const directories = f.ctx.get('workingDirectory');
+    const original = f.h.storageRoot;
+    const removed = join(original, 'removed-project');
+    const folder = join(original, '.dsh', 'agentdeck');
+    await mkdir(removed);
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, 'local.yaml'), 'schemaVersion: 3\nid: recovered-reader\nextends: reader\ninstructions: Use the recovered project instructions.');
+    await directories.set(f.h.parent, removed, new AbortController().signal);
+    await rmdir(removed);
+    assert.equal(directories.get(f.h.parent.session), removed);
+
+    const catalog = success(await f.call('scene_agent_catalog', { action: 'list' }));
+    const preview = success(await f.call('scene_agent_catalog', { action: 'preview', id: 'recovered-reader', cwd: '.' }));
+    assert.equal(catalog.agents.find(role => role.id === 'recovered-reader')?.revision, preview.agent.revision);
+    assert.equal(preview.agent.instructions, 'Use the recovered project instructions.');
+    assert.equal(directories.get(f.h.parent.session), removed);
+
+    const run = success(await start(f, { role: 'recovered-reader', revision: preview.agent.revision }));
+    const snapshot = f.domain().table('snapshots').get(run.revision);
+    assert.equal(snapshot.sourceRevision, preview.agent.revision);
+    assert.equal(snapshot.role.instructions, 'Use the recovered project instructions.');
+    assert.equal(directories.get(f.h.parent.session), original);
+    assert.equal(directories.get(f.ctx.agents.get(run.childId).session), original);
   } finally { await f.close(); }
 });

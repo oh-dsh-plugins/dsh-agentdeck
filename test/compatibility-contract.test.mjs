@@ -3,6 +3,20 @@ import test from 'node:test';
 import { activationSession, NativeSessionQueries } from '../lib/host/sessions.js';
 import { modelView, sessionRoutes, routeAuthorization } from '../lib/host/models.js';
 import { readRunResult } from '../lib/host/results.js';
+import { hostCompatibility, supportedHosts } from '../lib/host/compatibility.js';
+import { readFile } from 'node:fs/promises';
+
+test('the runtime adapter and install manifest admit the same exact DSH releases', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const declared = manifest.engines.dsh.split(/\s*\|\|\s*/);
+  assert.deepEqual(Object.keys(supportedHosts), declared);
+  for (const [name, range] of Object.entries(manifest.peerDependencies)) {
+    if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(range, manifest.engines.dsh);
+  }
+  for (const version of ['0.2.2', '0.2.3-alpha.1', '0.2.3-alpha.999', '1.0.0', 'constructor']) {
+    assert.throws(() => hostCompatibility(version), /AGENTDECK_UNSUPPORTED_DSH/);
+  }
+});
 
 const signal = new AbortController().signal;
 const actor = { id: 'parent' };

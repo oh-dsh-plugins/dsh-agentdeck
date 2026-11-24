@@ -10,6 +10,7 @@ import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt';
 import * as Role from '../lib/role.js';
+import { ownedHelper } from '../lib/host/role-tools.js';
 import { createNativeHarness, ROUTE, bounded, deferred } from '../scripts/probe-native.mjs';
 
 const projectHelper = 'assets/scripts/project-checks.mjs';
@@ -45,7 +46,7 @@ async function fixture(definition) {
     handle = await h.ctx.agents.create({ sessionId: `role-agent-${serial}`, meta: { cwd: h.storageRoot },
       agentOptions: { ...ROUTE, reasoningEffort: 'low' },
       setup: async agentCtx => {
-        fiber = agentCtx.plugin(Role, { snapshot: definition });
+        fiber = agentCtx.plugin(Role, { snapshot: { ...definition, expectedWorkspace: h.storageRoot } });
         await fiber;
       },
     });
@@ -249,6 +250,38 @@ test('data helper provides bounded numeric summaries without raw samples', async
     assert.equal(csv.value.exitCode, 0);
     assert.equal(JSON.parse(csv.value.stdout).columns[0].mean, 5);
   } finally { await f.close(); }
+});
+
+test('a CSV snapshot pinned before the parser update executes its original packaged script', async () => {
+  const definition = await snapshot(['files-read', 'project-runner', 'data-query']);
+  definition.scriptRevisions[csvHelper] = '47dcb29b6cbdcd0ac9eb22fba75a9d34f76fcb4bbedb22b81b422af05550f09f';
+  const f = await fixture(definition);
+  try {
+    await f.h.ctx.plugin(LocalSubprocess);
+    await writeFile(join(f.h.storageRoot, 'legacy.csv'), 'amount\n3\n""\n7\n');
+    await f.start();
+    const result = await f.call('agentdeck_parse_data', { path: 'legacy.csv', format: 'csv' });
+    assert.equal(result.isError, false, text(result));
+    assert.equal(result.value.exitCode, 0);
+    assert.equal(JSON.parse(result.value.stdout).totalRecords, 2, 'the historic parser skipped quoted empty records');
+  } finally { await f.close(); }
+});
+
+test('CSV compatibility requires a matching pinned path and intact packaged bytes', async () => {
+  const definition = await snapshot(['files-read', 'project-runner', 'data-query']);
+  const signal = new AbortController().signal;
+  const paths = [];
+  const ctx = { get: () => ({
+    async resolve(path) { paths.push(path); return path; },
+    async readBytes() { return Buffer.from('replacement bytes'); },
+    processPath() { assert.fail('Unverified bytes must not reach subprocess.'); },
+  }) };
+  definition.scriptRevisions[csvHelper] = '47dcb29b6cbdcd0ac9eb22fba75a9d34f76fcb4bbedb22b81b422af05550f09f';
+  await assert.rejects(ownedHelper(ctx, definition, csvHelper, signal), /Helper revision changed/);
+  assert.ok(paths[0].endsWith('/compat/csv-profile-0.3.0.mjs'));
+  definition.scriptRevisions[csvHelper] = '0'.repeat(64);
+  await assert.rejects(ownedHelper(ctx, definition, csvHelper, signal), /Helper revision changed/);
+  assert.ok(paths[1].endsWith('/assets/scripts/csv-profile.mjs'));
 });
 
 test('admitted long single-line attachment can be reconstructed through the tool cursor', async () => {

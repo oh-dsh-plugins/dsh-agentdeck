@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local';
 import Storage from '@deepseek-ai/dsh-storage';
 import * as JsonStorage from '@deepseek-ai/dsh-storage-json';
 import * as Domains from '@deepseek-ai/dsh-storage-domain';
@@ -44,8 +45,11 @@ async function fixture() {
     root.provide('subagents', { getProvider: () => ({}), rootOf: agent => agent });
     root.provide('sessionQuery', { observeSession: async () => ({ events: [], [Symbol.dispose]() {} }) });
     root.provide('agentPresets', { resolve: async id => ({ id }), register: async () => async () => {} });
-    root.provide('fs', {});
-    root.provide('workingDirectory', { get: () => directory });
+    await root.plugin(LocalFileSystem, { cwd: directory });
+    root.provide('workingDirectory', {
+      get: () => directory,
+      async ensure(_agent, signal) { signal.throwIfAborted(); return directory; },
+    });
     root.provide('skills', {});
     root.provide('tokenMeter', {});
     root.provide('llm', {
@@ -59,7 +63,7 @@ async function fixture() {
       },
       resolveCallConfig: async config => { calls.config.push({ ...config }); return { ...config, maxTokens: config.maxTokens ?? 4000 }; },
     });
-    controller = new AgentDeckController(root, store);
+    controller = new AgentDeckController(root, store, {}, undefined, { version: '0.2.2-rc.3', family: 'session-policy' });
   }
   await activate();
   return { actor, calls, directory,

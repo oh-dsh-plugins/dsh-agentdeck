@@ -42,15 +42,21 @@ window.__ModuleLoader__.load({
       return { ...preview.agent, validation: sameChoice ? preview.agent.validation : undefined, authorization: agent.authorization, configuredSelection: agent.configuredSelection,
         available: Boolean((!sameChoice || !preview.agent.validation || preview.agent.validation === 'valid') && preview.agent.capabilitiesAvailable && agent.authorization?.status === 'authorized') };
     }
-    function roleStatus(agent, selectedModel = false) {
+    function roleStatus(agent, selectedModel = false, sessionSelected = true) {
       if (!agent.enabled) return 'disabled';
       if (agent.authorization?.status === 'denied') return selectedModel ? 'selectedModelDenied' : 'modelDenied';
       if (agent.validation === 'invalid') return 'unavailable';
       if (agent.validation === 'unverified') return 'unknown';
       if (agent.missingCapabilities?.length) return 'unavailable';
       if (agent.unverifiedCapabilities?.length) return 'capabilityUnknown';
+      if (!sessionSelected) return 'noSession';
       if (agent.authorization?.status !== 'authorized') return 'authorizationUnknown';
       return agent.available ? 'available' : 'unavailable';
+    }
+    function RoleStatusBadge({ agent, selectedModel, sessionSelected, t }) {
+      const status = roleStatus(agent, selectedModel, sessionSelected);
+      const className = status === 'noSession' ? 'ad-muted' : agent.available ? 'ad-status' : 'ad-warning';
+      return h('span', { className }, t(status));
     }
     // Model metadata and Session authorization remain independent facts.
     function previewFacts(preview, sessionId) {
@@ -827,6 +833,11 @@ window.__ModuleLoader__.load({
         isDisposed: () => disposed,
         set: publish, error, openModelExport, exportModels, importModels, updateModelTransfer, mapTransferRoute, setTransferDefault, removeTransferRoute, transferIssue, checkModelTransfer, previewModelTransfer, adoptModelTransfer, openForm, restoreField, loadModelMetadata, loadCatalog, select, canEdit, useProjectEdit, edit, updateForm, setModelMode, updateCandidate, addCandidate, removeCandidate, selectPreviewCandidate, beginCreate, setNewId, setNewBase, importText, useExistingDocument, materializeDraft, save, reset, discard, setSession,
         loadModels, loadProviders, loadSuggestionModelOptions, suggestionModelOptionsState, loadModelOptions, modelOptionsState, modelMetadataState, loadCandidateOptions, loadCandidateMetadata, setCandidateProvider, setCandidateModel, loadPreview, syncReads, refresh, previewChange, acceptChangeImpact, setRunParent, openSuggestion, updateSuggestion, generateSuggestion, adoptSuggestion, suggestionCurrent,
+        captureWorkspaceCuts: () => {
+          if (!state.catalog?.runtime?.canCaptureWorkspaceCuts || state.busy.workspaceCapture) return;
+          publish({ workspaceCapture: null });
+          return request('workspaceCapture', 'captureWorkspaceCuts', {}, value => publish({ workspaceCapture: value }));
+        },
         loadRuns: (more = false) => {
           const cursor = more && state.runCursor;
           if (!cursor) api.closeResult();
@@ -841,9 +852,19 @@ window.__ModuleLoader__.load({
           return request('result', 'result', { childId, offset: continuation ? previous.nextOffset : 0, limit: 12000,
             ...(continuation ? { resultRevision: previous.resultRevision } : {}) }, value => {
             if (continuation && (!previous.resultRevision || value.resultRevision !== previous.resultRevision)) throw { code: 'AGENTDECK_RESULT_CHANGED', message: 'Result revision is missing or changed. Reload the first page.' };
-            const result = continuation ? { ...value, rawText: previous.rawText + value.rawText } : value;
+            const result = continuation ? { ...value, rawText: previous.rawText + value.rawText, nativeStopPage: previous.nativeStopPage } : value;
             const runs = state.runs?.map(run => run.childId === childId ? { ...run, businessStatus: result.status, businessStatusCheckedAt: continuation ? run.businessStatusCheckedAt : new Date().toISOString() } : run) ?? null;
             publish({ result, resultStale: false, runs });
+          });
+        },
+        loadNativeStop(childId) {
+          const result = state.result;
+          if (state.resultChild !== childId || state.resultStale || state.busy.result || !result?.nativeStopTruncated || !result.resultRevision) return;
+          const previous = result.nativeStopPage;
+          if (previous && previous.nextOffset === undefined) return;
+          return request('result', 'result', { childId, section: 'nativeStop', offset: previous?.nextOffset ?? 0, limit: 12000, resultRevision: result.resultRevision }, value => {
+            if (value.resultRevision !== result.resultRevision) throw { code: 'AGENTDECK_RESULT_CHANGED', message: 'Result revision is missing or changed. Reload the first page.' };
+            publish({ result: { ...result, nativeStopPage: { ...value, rawText: (previous?.rawText ?? '') + value.rawText } } });
           });
         }
       };
@@ -972,7 +993,7 @@ window.__ModuleLoader__.load({
           [t('configuredEffort'), facts.configuredSelection ? facts.configuredSelection.reasoningEffort ?? t('defaultEffort') : t('unknown')],
           [t('effectiveModel'), facts.effectiveSelection?.provider && facts.effectiveSelection?.model ? facts.effectiveSelection.provider + ' / ' + facts.effectiveSelection.model : t('unknown')],
           [t('effectiveEffort'), facts.effectiveSelection?.reasoningEffort ?? t('unknown')],
-          [t('authorization'), t({ authorized: 'authorized', denied: 'denied' }[authorization] || 'authorizationUnknown')],
+          [t('authorization'), t(!state.sessionId ? 'noSession' : { authorized: 'authorized', denied: 'denied' }[authorization] || 'authorizationUnknown')],
           [t('contextWindow'), exact?.contextWindow ?? t('unknown')],
           [t('defaultEffort'), exact?.defaultEffort ?? t('unknown')],
           [t('sessionEffort'), (models?.selection || preview?.sessionSelection)?.reasoningEffort ?? t('unknown')],
@@ -1041,7 +1062,7 @@ window.__ModuleLoader__.load({
           h('p', { className: 'ad-help', role: 'status' }, t(readOnly ? dirty ? 'draftScopeMismatch' : 'projectReadOnly' : 'projectWriteBound', { session: draft.writeSessionId || t('noSession') })),
           readOnly && !dirty && state.sessionId && h(Button, { onClick: () => controller.useProjectEdit(state.selectedId) }, t('useProjectEdit'))),
         agent && h('div', { className: 'ad-tags' },
-          h('span', { className: agent.available ? 'ad-status' : 'ad-warning' }, t(roleStatus(agent, true))),
+          h(RoleStatusBadge, { agent, selectedModel: true, sessionSelected: Boolean(state.sessionId), t }),
           h('span', { className: 'ad-tag' }, t('revision') + ' ' + agent.revision.slice(0, 12)),
           agent.id === 'general' && h('span', { className: 'ad-tag' }, t('generalFallback'))),
         agent?.missingCapabilities.length > 0 && h('p', { className: 'ad-warning' }, t('missing', { items: agent.missingCapabilities.map(id => t('cap.' + id)).join(', ') })),
@@ -1196,8 +1217,14 @@ window.__ModuleLoader__.load({
             state.result && h(React.Fragment, null,
               h(Stats, { rows: [[t('businessStatus'), enumText(state.resultStale ? 'unverified' : state.result.status, t)], [t('nativeStatus'), enumText(run.nativeStatus, t)], [t('child'), state.result.childId], [t('parent'), run.parentId]] }),
               h('section', { className: 'ad-section' }, h('h4', null, t('summary')), h('pre', null, typeof state.result.summary === 'string' ? state.result.summary : JSON.stringify(state.result.summary, null, 2))),
-              h(CodeDetail, { title: t('evidence'), value: state.result.evidence }), h(CodeDetail, { title: t('coverage'), value: state.result.coverage }), h(CodeDetail, { title: t('artifacts'), value: state.result.artifacts }), h(CodeDetail, { title: t('limitations'), value: state.result.limitations }), h(CodeDetail, { title: t('usage'), value: state.result.usage }), h(CodeDetail, { title: t('nativeStop'), value: state.result.nativeStop }),
-              h('section', { className: 'ad-section' }, h('h4', null, t('rawText')), h('pre', null, state.result.rawText || t('resultEmpty')), h('p', { className: 'ad-help' }, t('resultCharacters', { loaded: (state.result.rawText || '').length, total: state.result.totalCharacters })), !state.resultStale && state.result.nextOffset !== undefined && h(Button, { disabled: state.busy.result, onClick: () => controller.loadResult(run.childId, true) }, t('loadMore'))))
+              h(CodeDetail, { title: t('evidence'), value: state.result.evidence }), h(CodeDetail, { title: t('coverage'), value: state.result.coverage }), h(CodeDetail, { title: t('artifacts'), value: state.result.artifacts }), h(CodeDetail, { title: t('limitations'), value: state.result.limitations }), h(CodeDetail, { title: t('usage'), value: state.result.usage }),
+              h(CodeDetail, { title: t('nativeStop'), value: state.result.nativeStopPage?.rawText ?? state.result.nativeStop }),
+              state.result.nativeStopPage && h('p', { className: 'ad-help' }, t('resultCharacters', { loaded: state.result.nativeStopPage.rawText.length, total: state.result.nativeStopPage.totalCharacters })),
+              state.result.nativeStopTruncated && !state.resultStale && (!state.result.nativeStopPage || state.result.nativeStopPage.nextOffset !== undefined)
+                && h(Button, { disabled: state.busy.result, onClick: () => controller.loadNativeStop(run.childId) }, t(state.result.nativeStopPage ? 'loadMore' : 'loadNativeStop')),
+              h('section', { className: 'ad-section' }, h('h4', null, t('rawText')),
+                state.result.provisionalText && h('p', { className: 'ad-help' }, t('provisionalText')),
+                h('pre', null, state.result.rawText || t('resultEmpty')), h('p', { className: 'ad-help' }, t('resultCharacters', { loaded: (state.result.rawText || '').length, total: state.result.totalCharacters })), !state.resultStale && state.result.nextOffset !== undefined && h(Button, { disabled: state.busy.result, onClick: () => controller.loadResult(run.childId, true) }, t('loadMore'))))
           )))
       );
     }
@@ -1362,11 +1389,20 @@ window.__ModuleLoader__.load({
               h('label', { className: 'ad-field ad-search' }, h('span', { className: 'ad-sr' }, t('search')), h('input', { type: 'search', value: search, placeholder: t('searchHint'), onChange: event => setSearch(event.target.value) })),
               h('label', { className: 'ad-field' }, h('span', { className: 'ad-sr' }, t('roleFilter')), h('select', { value: filter, onChange: event => setFilter(event.target.value) }, h('option', { value: 'all' }, t('filterAll')), h('option', { value: 'enabled' }, t('filterEnabled')), h('option', { value: 'unavailable' }, t('filterUnavailable')))),
               h('p', { className: 'ad-help', style: { marginTop: 8 } }, t('count', { count: filtered.length + broken.length })),
-              h('ul', { className: 'ad-role-list' }, filtered.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, locale.resolveText(item.title)), h('span', { className: 'ad-role-meta' }, h('span', null, t(item.enabled ? 'enabled' : 'disabled')), h('span', { className: item.available ? 'ad-status' : 'ad-warning' }, t(roleStatus(item))), isDirty(state.drafts[item.id]) && h('span', null, t('dirty')))))), broken.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, item.id), h('span', { className: 'ad-role-meta ad-warning' }, t('unavailable')))))),
+              h('ul', { className: 'ad-role-list' }, filtered.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, locale.resolveText(item.title)), h('span', { className: 'ad-role-meta' }, h('span', null, t(item.enabled ? 'enabled' : 'disabled')), h(RoleStatusBadge, { agent: item, sessionSelected: Boolean(state.sessionId), t }), isDirty(state.drafts[item.id]) && h('span', null, t('dirty')))))), broken.map(item => h('li', { key: item.id }, h('button', { type: 'button', className: 'ad-role', 'aria-current': state.selectedId === item.id, onClick: () => controller.select(item.id) }, h('span', { className: 'ad-role-name' }, item.id), h('span', { className: 'ad-role-meta ad-warning' }, t('unavailable')))))),
               !filtered.length && !broken.length && h('p', { className: 'ad-empty' }, t('noRoles'))),
               h(RoleDetail, { state, controller, t, locale, exportDraft }))),
           state.tab === 'runs' && h(Runs, { state, controller, t, locale }),
-          state.tab === 'diagnostics' && h('section', { 'aria-label': t('diagnostics') }, state.catalog?.runtime && h(React.Fragment, null, h('h3', null, t('runtime')), h(Stats, { rows: [[t('compatibilityVersion'), state.catalog.runtime.compatibilityVersion], [t('nativeProvider'), t(state.catalog.runtime.nativeProvider ? 'yes' : 'no')], [t('storage'), t(state.catalog.runtime.storage ? 'yes' : 'no')]] })), h('div', { className: 'ad-section' }, h('h3', null, t('diagnostics')), state.catalog?.diagnostics.length ? h(DiagnosticList, { items: state.catalog.diagnostics, t }) : h('p', { className: 'ad-empty' }, t('noDiagnostics')))))
+          state.tab === 'diagnostics' && h('section', { 'aria-label': t('diagnostics') },
+            state.catalog?.runtime && h(React.Fragment, null, h('h3', null, t('runtime')), h(Stats, { rows: [[t('compatibilityVersion'), state.catalog.runtime.compatibilityVersion], [t('nativeProvider'), t(state.catalog.runtime.nativeProvider ? 'yes' : 'no')], [t('storage'), t(state.catalog.runtime.storage ? 'yes' : 'no')]] })),
+            state.catalog?.runtime?.canCaptureWorkspaceCuts && h('div', { className: 'ad-section' },
+              h('p', { className: 'ad-help' }, t('captureWorkspaceHelp')),
+              h(Button, { disabled: state.busy.workspaceCapture, onClick: () => controller.captureWorkspaceCuts() }, t('captureWorkspaceCuts')),
+              h(ErrorNotice, { value: state.errors.workspaceCapture, t }),
+              state.workspaceCapture && h(React.Fragment, null,
+                h('p', { role: 'status' }, t('captureWorkspaceResult', { captured: state.workspaceCapture.captured.length, pending: state.workspaceCapture.pending.length })),
+                state.workspaceCapture.pending.length > 0 && h('ul', null, state.workspaceCapture.pending.map(item => h('li', { key: item.runId }, `${item.runId}: ${item.reason}`))))),
+            h('div', { className: 'ad-section' }, h('h3', null, t('diagnostics')), state.catalog?.diagnostics.length ? h(DiagnosticList, { items: state.catalog.diagnostics, t }) : h('p', { className: 'ad-empty' }, t('noDiagnostics')))))
       );
     }
     return {

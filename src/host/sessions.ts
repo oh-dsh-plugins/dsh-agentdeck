@@ -1,5 +1,4 @@
-import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { getDshRuntimeVersion } from '@deepseek-ai/dsh-app-boot';
 import type { HostContext, RuntimeAgent, RunRecord } from './types.js';
 import { record, type NativeEvent, type SessionQueries, type StartupLookup } from './contracts.js';
 
@@ -19,14 +18,6 @@ export async function activationSession(value: unknown, actor: RuntimeAgent, sig
   }
   throw new Error('Native activation identity is unknown or ambiguous; reconcile the accepted child without repeating dispatch.');
 }
-function runtimeVersion(): string {
-  try {
-    const path = createRequire(import.meta.url).resolve('@deepseek-ai/dsh-tools/package.json');
-    const pkg: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (record(pkg) && typeof pkg.version === 'string') return pkg.version;
-  } catch { /* Version diagnostics cannot turn an otherwise usable host into a startup failure. */ }
-  return 'unknown';
-}
 
 /** Read-only native projections stay here; no private runtime helpers or synthetic Agents. */
 export class NativeSessionQueries implements SessionQueries {
@@ -34,7 +25,7 @@ export class NativeSessionQueries implements SessionQueries {
   private readonly subagents: SubagentQueries;
   private get query(): NativeQuery { return this.ctx.get('sessionQuery') as NativeQuery; }
   private readonly rootMode: 'tree' | 'registry' | 'unavailable';
-  constructor(private readonly ctx: HostContext) {
+  constructor(private readonly ctx: HostContext, private readonly version = getDshRuntimeVersion()) {
     this.registry = ctx.get('agents') as AgentDirectory;
     this.subagents = ctx.get('subagents') as SubagentQueries;
     this.rootMode = typeof this.subagents?.rootOf === 'function' ? 'tree' : typeof this.registry?.roots === 'function' ? 'registry' : 'unavailable';
@@ -47,7 +38,7 @@ export class NativeSessionQueries implements SessionQueries {
     throw new Error('Native root Session discovery is unavailable; no unverified registry entries are exposed.');
   }
   diagnostics() {
-    return { compatibilityVersion: runtimeVersion(), minimumVersion: '0.2.2-rc.1', rootDiscovery: this.rootMode,
+    return { compatibilityVersion: this.version, minimumVersion: '0.2.2-rc.1', rootDiscovery: this.rootMode,
       activationReceipt: typeof this.subagents?.resolveName === 'function' ? 'name' : 'id', nativeProvider: !!this.subagents?.getProvider('spawn'), storage: true };
   }
   async events(id: string, signal?: AbortSignal): Promise<readonly NativeEvent[]> {

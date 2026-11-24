@@ -26,10 +26,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24
+          node-version: 24.22.3
           cache: npm
-      - name: Install the pinned DSH host
-        run: npm install --global --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.3
+      - name: Install DSH build baseline and native manager dependency
+        run: npm install --global --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.3 pnpm@11.25.0
       - name: Install source dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Link public host packages
@@ -46,5 +46,5 @@ jobs:
         run: npm run check:pack
       - name: Pack one compatibility candidate
         run: mkdir -p artifacts && npm pack --ignore-scripts --pack-destination artifacts
-      - name: Verify the same archive on five DSH hosts and an upgrade
+      - name: Verify the same archive with native DSH install and upgrades
         run: npm run test:compatibility

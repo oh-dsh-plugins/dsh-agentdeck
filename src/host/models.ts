@@ -1,6 +1,7 @@
 import type { HostContext, RuntimeAgent, JsonObject, EffectiveSelection } from './types.js';
 import { messageOf, requiredString } from './types.js';
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
+import type { HostFamily } from './compatibility.js';
 import { record, type ModelView, type EffortView, type ModelQueries, type RoutePolicy, type ModelRoute } from './contracts.js';
 
 export function currentSelection(agent?: RuntimeAgent): JsonObject | undefined {
@@ -20,7 +21,12 @@ export function delegationSelection(agent?: RuntimeAgent): JsonObject | undefine
 export type { RoutePolicy } from './contracts.js';
 const unknownPolicy = (): Exclude<RoutePolicy, ModelRoute[] | undefined> => ({ kind: 'unknown', message: 'Native Session model policy is unavailable or unsupported. Authorization remains unknown; native delegation will not be bypassed.' });
 function policyUnknown(policy: RoutePolicy): policy is Exclude<RoutePolicy, ModelRoute[] | undefined> { return policy !== undefined && !Array.isArray(policy); }
-function policyName(agent: RuntimeAgent | undefined, policy: RoutePolicy): string { return !agent ? 'not-selected' : policyUnknown(policy) ? 'unknown' : policy ? 'session' : 'parent-only'; }
+function policyName(agent: RuntimeAgent | undefined, policy: RoutePolicy, family?: HostFamily): string {
+  if (!agent) return 'not-selected';
+  if (policyUnknown(policy)) return 'unknown';
+  if (!policy) return 'parent-only';
+  return family === 'live-policy' ? 'live' : 'session';
+}
 
 export async function sessionRoutes(ctx: HostContext, agent?: RuntimeAgent, signal?: AbortSignal): Promise<RoutePolicy> {
   if (!agent) return undefined;
@@ -38,22 +44,41 @@ export async function sessionRoutes(ctx: HostContext, agent?: RuntimeAgent, sign
   return undefined;
 }
 
+async function liveRoutes(ctx: HostContext, agent?: RuntimeAgent, signal?: AbortSignal): Promise<RoutePolicy> {
+  signal?.throwIfAborted();
+  if (!agent) return undefined;
+  const settings: unknown = ctx.get('subagentModelSelection');
+  if (settings === undefined) return undefined;
+  if (!record(settings) || typeof settings.allowedRoutes !== 'function') return unknownPolicy();
+  try {
+    const routes: unknown = settings.allowedRoutes();
+    if (routes === undefined) return undefined;
+    if (!Array.isArray(routes) || !routes.every(route => record(route) && typeof route.provider === 'string' && !!route.provider.trim() && typeof route.model === 'string' && !!route.model.trim())) return unknownPolicy();
+    return routes.map(route => ({ provider: route.provider, model: route.model }));
+  } catch (error) {
+    if (record(error) && error.code === 'INVALID_MODEL_SELECTION_SETTINGS') return { kind: 'unknown', code: error.code, message: messageOf(error) };
+    throw error;
+  }
+}
+
 export function explicitModelRoutes(parent: JsonObject | undefined, routes: Awaited<ReturnType<typeof sessionRoutes>>) {
   return policyUnknown(routes) ? [] : routes ?? (parent?.provider && parent.model ? [{ provider: parent.provider, model: parent.model }] : []);
 }
 
 /** Match native implicit inheritance and explicit route policy without discovering models. */
 export function routeAuthorization(configured: EffectiveSelection | undefined, parent: JsonObject | undefined,
-  routes: RoutePolicy, hasSession: boolean, explicit: boolean): JsonObject {
+  routes: RoutePolicy, hasSession: boolean, explicit: boolean, family: HostFamily = 'session-policy'): JsonObject {
   if (!hasSession || !configured || !parent) return { status: 'unknown' };
-  if (policyUnknown(routes)) return { status: 'unknown', code: 'AGENTDECK_MODEL_POLICY_UNKNOWN', policy: 'unknown', message: routes.message };
   const same = parent.provider === configured.provider && parent.model === configured.model;
+  if (family === 'live-policy' && !explicit && same) return { status: 'authorized' };
+  if (policyUnknown(routes)) return { status: 'unknown', code: routes.code ?? 'AGENTDECK_MODEL_POLICY_UNKNOWN', policy: 'unknown', message: routes.message };
   const allowedModels = explicitModelRoutes(parent, routes);
   if ((!explicit && same) || allowedModels.some(route => route.provider === configured.provider && route.model === configured.model)) return { status: 'authorized' };
   const allowed = allowedModels.slice(0, 8).map(route => `${route.provider}/${route.model}`).join(', ') || '(none)';
-  return { status: 'denied', code: 'AGENTDECK_MODEL_NOT_AUTHORIZED', policy: routes ? 'session' : 'parent-only',
+  const live = family === 'live-policy';
+  return { status: 'denied', code: 'AGENTDECK_MODEL_NOT_AUTHORIZED', policy: routes ? (live ? 'live' : 'session') : 'parent-only',
     route: { provider: configured.provider, model: configured.model }, allowedModels,
-    message: `[AGENTDECK_MODEL_NOT_AUTHORIZED] The effective role route ${configured.provider}/${configured.model} is not authorized by this Session. No child was started. Allowed explicit routes: ${allowed}${allowedModels.length > 8 ? ' (more in Session policy)' : ''}. The owner can change the saved role model in AgentDeck, or configure native /model-selection-settings and create a new Session. Settings changes do not authorize this existing Session. Native delegation will not be bypassed.` };
+    message: `[AGENTDECK_MODEL_NOT_AUTHORIZED] The effective role route ${configured.provider}/${configured.model} is not authorized by this Session. No child was started. Allowed explicit routes: ${allowed}${allowedModels.length > 8 ? ' (additional routes available)' : ''}. ${live ? 'The owner can change the saved role model or update the current native model selection settings.' : 'The owner can change the saved role model in AgentDeck, or configure native /model-selection-settings and create a new Session. Settings changes do not authorize this existing Session.'} Native delegation will not be bypassed.` };
 }
 
 export class ModelAuthorizationError extends Error {
@@ -93,18 +118,19 @@ export function modelView(info: JsonObject, authorized: boolean | null): ModelVi
 }
 
 /** Context-scoped query adapter; metadata never grants Session authorization. */
-export function createModelQueries(ctx: HostContext): ModelQueries {
+export function createModelQueries(ctx: HostContext, family: HostFamily = 'session-policy'): ModelQueries {
+  const policy = (agent?: RuntimeAgent, signal?: AbortSignal) => family === 'live-policy' ? liveRoutes(ctx, agent, signal) : sessionRoutes(ctx, agent, signal);
   return {
     selection: currentSelection,
     inheritance: delegationSelection,
-    policy: (agent, signal) => sessionRoutes(ctx, agent, signal),
+    policy,
     resolve: async (configured, signal, parent) => {
       const { reasoningEffort, ...config } = configured;
       return ctx.llm.resolveCallConfig({ ...(parent?.maxTokens === undefined ? {} : { maxTokens: parent.maxTokens }), ...config,
         ...(reasoningEffort ? { reasoningEffort: ReasoningEffortId(reasoningEffort) } : {}) }, signal);
     },
     info: async (provider, model, signal) => modelView(await ctx.llm.resolveModelInfo(provider, model, signal), null),
-    directory: (agent, query, signal, optionsOnly) => modelDirectory(ctx, agent, query, signal, optionsOnly),
+    directory: async (agent, query, signal, optionsOnly) => modelDirectory(ctx, agent, query, signal, optionsOnly, false, { routes: await policy(agent, signal), family }),
   };
 }
 
@@ -185,7 +211,7 @@ function modelPermissions(agent: RuntimeAgent | undefined, routes: ModelRoute[],
   return (provider, model) => agent && !unknown ? allowed.has(JSON.stringify([provider, model])) : null;
 }
 
-export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, query?: { provider: string; model?: string }, signal?: AbortSignal, optionsOnly = false, authorizedRoutesOnly = false, routeSnapshot?: { routes: Awaited<ReturnType<typeof sessionRoutes>> }): Promise<JsonObject> {
+export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, query?: { provider: string; model?: string }, signal?: AbortSignal, optionsOnly = false, authorizedRoutesOnly = false, routeSnapshot?: { routes: RoutePolicy; family?: HostFamily }): Promise<JsonObject> {
   const llm = ctx.get('llm') as any;
   if (!llm) return { providers: [], models: [], policy: agent ? 'parent-only' : 'not-selected', diagnostics: ['Native llm service is unavailable.'] };
   const providers = llm.listProviders().map((provider: JsonObject) => ({ id: provider.id, name: displayName(provider.name, provider.id), label: displayName(provider.name, provider.id) }));
@@ -194,7 +220,7 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
   const routes = routeSnapshot ? routeSnapshot.routes : await sessionRoutes(ctx, agent, signal);
   signal?.throwIfAborted();
   const explicitRoutes = explicitModelRoutes(inheritance, routes);
-  if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), explicitRoutes, policy: policyName(agent, routes), diagnostics: [] };
+  if (optionsOnly && !query) return { providers, models: [], ...(selection ? { selection } : {}), explicitRoutes, policy: policyName(agent, routes, routeSnapshot?.family), diagnostics: [] };
   const allowed = modelPermissions(agent, explicitRoutes, policyUnknown(routes));
   const diagnostics: string[] = policyUnknown(routes) ? [routes.message] : [];
   const rows = new Map<string, any>();
@@ -245,5 +271,5 @@ export async function modelDirectory(ctx: HostContext, agent?: RuntimeAgent, que
     if (!rows.has(key)) rows.set(key, { provider: route.provider, id: route.model, name: route.model });
   }
   const models = await resolveModelRows(ctx, [...rows.values()], allowed, signal, optionsOnly && !exact);
-  return { providers, models, ...(selection ? { selection } : {}), policy: policyName(agent, routes), diagnostics };
+  return { providers, models, ...(selection ? { selection } : {}), policy: policyName(agent, routes, routeSnapshot?.family), diagnostics };
 }

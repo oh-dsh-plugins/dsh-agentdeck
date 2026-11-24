@@ -34,6 +34,7 @@ import nativeToolsPackage from '@deepseek-ai/dsh-tools/package.json' with { type
 import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline';
 import WorkingDirectoryService from '@deepseek-ai/dsh-working-directory';
 
+export const liveHost = /^0\.2\.3-alpha\.[12]$/.test(nativeToolsPackage.version);
 export const PRIVATE_TOOL = 'agentdeck_native_private_probe';
 export const ROUTE = { provider: 'agentdeck-local-proof', model: 'parent' };
 export const CHILD_TEXT = 'Native child completed the isolated proof.';
@@ -127,7 +128,8 @@ export class LocalProofAdapter extends LlmAdapter {
 }
 
 /** Real native services; task-owned temporary JSONL data is removed on close. */
-export async function createNativeHarness({ policy, toolOptions = {}, holdChild = false, directory, resumeSessionId } = {}) {
+export async function createNativeHarness({ policy, toolOptions = {}, holdChild = false, directory, resumeSessionId,
+  parentSessionId = 'native-proof-parent', beforeActivation } = {}) {
   if (process.env.AGENTDECK_EXPECT_DSH_VERSION) assert.equal(nativeToolsPackage.version, process.env.AGENTDECK_EXPECT_DSH_VERSION, 'The fixture must resolve the selected isolated host');
   const tempParent = await realpath(tmpdir());
   const storageRoot = directory ? await realpath(directory) : await mkdtemp(join(tempParent, 'agentdeck-native-proof-'));
@@ -187,6 +189,10 @@ export async function createNativeHarness({ policy, toolOptions = {}, holdChild 
     await root.plugin(AgentLoop);
     await root.plugin(SubagentRuntime);
     await root.plugin(NativeSpawn);
+    if (liveHost && policy !== undefined) {
+      const { default: ModelSelectionSettings } = await import('@deepseek-ai/dsh-tool-subagent/model-selection-settings');
+      await root.plugin(ModelSelectionSettings, { enabled: true, allowedModels: policy });
+    }
     await root.plugin(Object.assign((owner) => {
       ctx = owner;
       // Observe only this isolated runtime's public startup boundary. The exact
@@ -199,6 +205,7 @@ export async function createNativeHarness({ policy, toolOptions = {}, holdChild 
       Object.defineProperty(subagents, 'startActivation', {
         configurable: true, writable: true,
         async value(spec) {
+          await beforeActivation?.(spec, owner);
           const activation = await startActivation.call(subagents, spec);
           activations.push(activation);
           return activation;
@@ -224,11 +231,11 @@ export async function createNativeHarness({ policy, toolOptions = {}, holdChild 
       modelDiscovery: true, maxDepth: 1, ...toolOptions,
     });
     parentHandle = resumeSessionId ? await ctx.agents.resume({ resumeSessionId, agentOptions: { ...ROUTE, reasoningEffort: 'low' } }) : await ctx.agents.create({
-      sessionId: 'native-proof-parent',
+      sessionId: parentSessionId,
       meta: { cwd: storageRoot },
       agentOptions: { ...ROUTE, reasoningEffort: 'low' },
       setup: (_agentCtx, agent) => {
-        if (policy) agent.session.append('subagent/model-selection-policy', { allowedModels: policy });
+        if (!liveHost && policy) agent.session.append('subagent/model-selection-policy', { allowedModels: policy });
       },
     });
     const parent = parentHandle.agent;

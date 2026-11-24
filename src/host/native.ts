@@ -8,7 +8,7 @@ import { activationSession } from './sessions.js';
 
 export class NativeDelegationFailure extends Error {
   readonly code: string;
-  constructor(message: string, readonly beforeDispatch: boolean, code?: string) {
+  constructor(message: string, readonly noChildAccepted: boolean, code?: string) {
     super(message); this.name = 'NativeDelegationFailure'; this.code = code ?? 'AGENTDECK_NATIVE_FAILED';
   }
 }
@@ -61,12 +61,21 @@ export class NativeDelegator implements TaskCommands {
     });
     const beforeDispatch = prepared.kind !== 'dispatch';
     const dispatched = prepared.kind === 'dispatch' ? await pipeline.dispatch(prepared.exec) : prepared;
+    // Native capacity is reserved before activation. Trust the typed tool-body
+    // refusal, not text or an error emitted by the post-execute pipeline.
+    const error = !beforeDispatch && dispatched.kind === 'post-result' && dispatched.result.isError
+      ? dispatched.result.error : undefined;
+    const refusal = error?.info?.name === 'SubagentError' && error.info.code === 'ACTIVATION_LIMIT_REACHED'
+      ? new NativeDelegationFailure(error.message, true, error.info.code) : undefined;
     const result = await pipeline.complete(prepared.exec, dispatched).catch(error => {
-      if (!beforeDispatch) throw error;
+      if (!beforeDispatch && !refusal) throw error;
       throw new NativeDelegationFailure(error instanceof Error ? error.message : String(error), true);
     });
     for (const context of result.additionalContexts ?? []) outer.deferContext(context);
-    if (result.isError) throw new NativeDelegationFailure(result.error.message, beforeDispatch, result.error.info?.code);
+    if (result.isError) {
+      throw new NativeDelegationFailure(result.error.message, beforeDispatch || refusal !== undefined, result.error.info?.code);
+    }
+    if (refusal) throw refusal;
     if (result.concludesTurn) outer.concludeTurn();
     try { return await activationSession(result.value, outer.agent, outer.signal, this.ctx.subagents); }
     catch (error) { throw new NativeDelegationFailure(`Native child was accepted but its Session identity could not be resolved: ${error instanceof Error ? error.message : String(error)}. Reconcile the existing startup; do not repeat it.`, false); }

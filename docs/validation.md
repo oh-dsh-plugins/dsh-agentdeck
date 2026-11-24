@@ -4,7 +4,9 @@
 
 ## Compatibility verification
 
-The declared DSH range is >=0.2.2-rc.1 without an artificial upper bound. The executable matrix uses published rc.1, rc.2, rc.3, rc.4 and rc.5. A future version is eligible for this range, but its behavior is not verified until the same checks pass.
+The source manifest declares exact DSH versions. The matrix covers `0.2.2-rc.1` through `0.2.2-rc.5` and `0.2.3-alpha.2`. The published `0.2.3-alpha.1` is excluded because its CLI fails on a clean install without AgentDeck. Its `dsh-app-boot` imports `EntryValidationError` from `@deepseek-ai/cordis-plugin-loader`, which is absent from the resolved `1.1.0` package.
+
+To add an upstream version, review its public contracts, map it to a verified compatibility family and prove the same archive across the complete matrix. Use a Node version supported by all selected hosts and make `pnpm` available to the native DSH plugin manager.
 
 Build and pack once, then run the existing tests from physical fixture files against each isolated exact DSH dependency closure:
 
@@ -17,13 +19,13 @@ npm run test:compatibility
 
 The runner checks the installed archive integrity, native entry resolution paths and exact host versions, loads the public package entries, and enables BrowserSkill fixtures with a local runner. It clears NODE_PATH/NODE_OPTIONS. No live profile, browser, credentials or paid provider is needed. The same bytes are used by every host cell. Tests exercise native authorization denial, caller identity, cancellation, completion, Team coexistence, normalized model metadata, unknown shapes and the existing Client contracts.
 
-A separate process creates a real persisted task on rc.1, then rc.5 resumes its parent and the same child with the original snapshot, tools and preset despite a later role override. The runner retains logs, installed fixture resources and upgrade state under .agentdeck-dev/compatibility for inspection, and removes each temporary host closure after its proof to bound disk use. Remove that owned directory after collecting results. --root, --versions and --archive support targeted reproduction. The CI/release gate runs this procedure before preserving the publishable archive. A local pass is not a remote workflow result.
+The runner installs the exact archive with the native DSH plugin manager and cold boots a disposable profile for each selected host. It also verifies RC.1-to-RC.5 continuation of the same child, snapshot, tools and preset. For RC.5-to-Alpha, it seeds data with the published AgentDeck 0.3.1 and records the old workspaces using the compiled Client and native authenticated owner RPC. An open parent blocks recording. Restarting RC with the parent unopened allows recording. The probe tests both a matching inherited workspace and a mismatched legacy explicit workspace. The latter must be rejected by both AgentDeck control and native cold restore. The runner retains logs, installed fixture resources and upgrade state under .agentdeck-dev/compatibility for inspection, and removes each temporary host closure after its proof to bound disk use. Remove that owned directory after collecting results. --root, --versions and --archive support targeted reproduction. The CI/release gate runs this procedure before preserving the publishable archive. A local pass is not a remote workflow result.
 
 ## Recorded baseline
 
 AgentDeck 0.2.4 was exercised with DSH 0.2.2-rc.3, Node.js 24, and BrowserSkill 0.5.0 for the optional browser path. The full local suite passed **173 tests, zero failures and zero skips**. TypeScript checking and package resource validation also passed. This records observed validation, not a promise of compatibility with other DSH releases or model gateways.
 
-The repository's CI runs the source checks and the same-archive five-host matrix with isolated BrowserSkill fixtures. Its workflow badge reports that run separately; a local pass does not imply a remote CI pass.
+CI and the release workflow run the source checks and the same-archive DSH matrix with isolated BrowserSkill fixtures. Their workflow records are separate from local verification.
 
 ## Current source verification — 0.2.7 progressive batch setup
 

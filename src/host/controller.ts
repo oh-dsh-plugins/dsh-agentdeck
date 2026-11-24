@@ -8,6 +8,7 @@ import { rolePresentation } from '../core/presentation.js';
 import { applyDefinitionActions } from './setup.js';
 import { suggestRole } from './suggestions.js';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
+import { SessionId } from '@deepseek-ai/dsh-session';
 import type { TaskCommands, SessionQueries, ModelQueries, ModelView } from './contracts.js';
 import { NativeSessionQueries } from './sessions.js';
 import { AgentDeckStore, textRevision } from './store.js';
@@ -22,6 +23,8 @@ import { browserReadiness } from './browser-runtime.js';
 import { object, requiredString, optionalString, messageOf, jsonClone } from './types.js';
 import type { HostContext, RuntimeAgent, RoleSnapshot, RunRecord, JsonObject, EffectiveSelection } from './types.js';
 import { RoleCatalogs, assertNoRoleLoss, assertReadable } from './configuration.js';
+import { delegationWorkspace, hostCompatibility } from './compatibility.js';
+import { captureWorkspaceCuts, checkProjectedWorkspace, migratedWorkspace, verifyWorkspaceDirectory } from './workspace.js';
 
 export interface AgentDeckConfig { customAgentDirs?: string[]; projectConfigDirectory?: string; allowNativeFallback?: boolean }
 const textInputRequired = 'Agent roles require a model that supports text input.';
@@ -65,11 +68,12 @@ export class AgentDeckController {
   private readonly starts = new Map<string, Promise<JsonObject>>();
   private readonly builtinIds = new Set(loadBuiltinAgents().map(role => role.id));
   readonly diagnostics: string[] = [];
-  constructor(readonly ctx: HostContext, readonly store: AgentDeckStore, readonly config: AgentDeckConfig = {}, ports?: { tasks: TaskCommands; sessions: SessionQueries; models: ModelQueries }) {
+  constructor(readonly ctx: HostContext, readonly store: AgentDeckStore, readonly config: AgentDeckConfig = {}, ports?: { tasks: TaskCommands; sessions: SessionQueries; models: ModelQueries },
+    private readonly compatibility = hostCompatibility()) {
     this.configuration = new RoleCatalogs(ctx, () => store.overrides(), config.customAgentDirs ?? [], config.projectConfigDirectory ?? '.dsh/agentdeck');
     this.native = ports?.tasks ?? new NativeDelegator(ctx);
-    this.sessions = ports?.sessions ?? new NativeSessionQueries(ctx);
-    this.modelQueries = ports?.models ?? createModelQueries(ctx);
+    this.sessions = ports?.sessions ?? new NativeSessionQueries(ctx, compatibility.version);
+    this.modelQueries = ports?.models ?? createModelQueries(ctx, compatibility.family);
     this.presets = new SnapshotPresets(ctx);
   }
   async restore(): Promise<void> {
@@ -85,14 +89,8 @@ export class AgentDeckController {
   private cwd(agent?: RuntimeAgent): string | undefined {
     return this.configuration.cwd(agent);
   }
-  private resolved(agent?: RuntimeAgent, cwd?: string) { return this.configuration.read(agent, cwd); }
-  private targetDirectory(agent: RuntimeAgent | undefined, value: unknown): string | undefined {
-    if (value === undefined) return undefined;
-    const path = requiredString(value, 'cwd');
-    if (isAbsolute(path)) return resolve(path);
-    const base = this.cwd(agent);
-    if (!base) throw new Error('A relative cwd requires the calling Session working directory.');
-    return resolve(base, path);
+  private resolved(agent?: RuntimeAgent, cwd?: string, signal?: AbortSignal, delegation = false) {
+    return this.configuration.read(agent, cwd, signal, delegation && this.compatibility.family === 'live-policy');
   }
   private names(): string[] {
     // An advisory page read must not initialize every dynamic tool provider.
@@ -113,7 +111,7 @@ export class AgentDeckController {
       ...(choice.configured ? { configuredSelection: choice.configured } : {}), authorization };
   }
   async catalog(agent?: RuntimeAgent, signal = new AbortController().signal, cwd?: string): Promise<JsonObject> {
-    const catalog = await this.resolved(agent, this.targetDirectory(agent, cwd));
+    const catalog = await this.resolved(agent, optionalString(cwd, 'cwd'), signal);
     signal.throwIfAborted();
     const names = this.names();
     const parent = this.modelQueries.inheritance(agent);
@@ -125,12 +123,12 @@ export class AgentDeckController {
         const choice = roleChoice(role, parent);
         const source = sources.get(role.id);
         return { ...this.selectionView(this.roleView(role, names, catalog.blockers.length > 0), choice,
-          routeAuthorization(choice.configured, parent, routes, !!agent, choice.explicit)), ...(source && !source.startsWith('user:') ? { source } : {}), ...(role.extends ? { parentSource: sources.get(role.extends) ?? 'builtin' } : {}) };
+          routeAuthorization(choice.configured, parent, routes, !!agent, choice.explicit, this.compatibility.family)), ...(source && !source.startsWith('user:') ? { source } : {}), ...(role.extends ? { parentSource: sources.get(role.extends) ?? 'builtin' } : {}) };
       }),
       diagnostics: [...catalog.diagnostics, ...this.diagnostics.map(message => ({ message }))],
       project: catalog.project ?? null,
       overrides: this.store.overrides(),
-      runtime: this.sessions.diagnostics(),
+      runtime: { ...this.sessions.diagnostics(), canCaptureWorkspaceCuts: this.compatibility.family === 'session-policy' },
       sessions: this.sessions.roots().map(item => ({ id: item.id, cwd: this.cwd(item) })),
     };
   }
@@ -146,8 +144,8 @@ export class AgentDeckController {
     const result = await this.modelQueries.directory(agent, provider ? { provider, ...(model ? { model } : {}) } : undefined, signal, request.view === 'options');
     return provider ? { ...result, models: result.models.filter((value: any) => value.provider === provider) } : result;
   }
-  private async role(id: string, agent?: RuntimeAgent, cwd?: string): Promise<AgentDefinition> {
-    const catalog = await this.resolved(agent, cwd);
+  private async role(id: string, agent?: RuntimeAgent, cwd?: string, signal?: AbortSignal): Promise<AgentDefinition> {
+    const catalog = await this.resolved(agent, cwd, signal, true);
     if (catalog.blockers.length) throw new Error(`Role source cannot be read safely: ${catalog.blockers.map(value => `${value.source}: ${value.message}`).join('; ')}`);
     const role = catalog.agents.find(value => value.id === id);
     const problem = catalog.diagnostics.find(issue => issue.id === id);
@@ -157,9 +155,10 @@ export class AgentDeckController {
     return role;
   }
   private async authorization(configured: EffectiveSelection | undefined, agent: RuntimeAgent | undefined, explicit: boolean, signal?: AbortSignal): Promise<JsonObject> {
-    const routes = await this.modelQueries.policy(agent, signal);
+    const family = this.compatibility.family;
+    const routes = family === 'live-policy' && !explicit ? undefined : await this.modelQueries.policy(agent, signal);
     signal?.throwIfAborted();
-    return routeAuthorization(configured, this.modelQueries.inheritance(agent), routes, !!agent, explicit);
+    return routeAuthorization(configured, this.modelQueries.inheritance(agent), routes, !!agent, explicit, family);
   }
   private async resolveConfig(configured: EffectiveSelection, signal?: AbortSignal, parent?: JsonObject): Promise<EffectiveSelection> {
     return this.modelQueries.resolve(configured, signal, parent);
@@ -178,18 +177,18 @@ export class AgentDeckController {
     return { effective, metadata, nativeFields, choice };
   }
   async candidates(id: string, agent?: RuntimeAgent, signal = new AbortController().signal, cwd?: string): Promise<JsonObject> {
-    const role = await this.role(id, agent, this.targetDirectory(agent, cwd));
+    const role = await this.role(id, agent, optionalString(cwd, 'cwd'), signal);
     signal.throwIfAborted();
     const routes = agent ? await this.modelQueries.policy(agent, signal) : undefined;
     const parent = this.modelQueries.inheritance(agent);
     return { id: role.id, revision: agentRevision(role), mode: role.model.mode, defaultCandidate: role.model.defaultCandidate,
       candidates: (role.model.candidates ?? []).map(candidate => ({ id: candidate.id, purpose: candidate.purpose, provider: candidate.provider, model: candidate.model,
         reasoning: candidate.reasoning,
-        authorization: routeAuthorization(candidate, parent, routes, !!agent, true).status })) };
+        authorization: routeAuthorization(candidate, parent, routes, !!agent, true, this.compatibility.family).status })) };
   }
   async preview(id: string, agent?: RuntimeAgent, signal = new AbortController().signal, request: JsonObject = {}): Promise<JsonObject> {
     signal.throwIfAborted();
-    const role = await this.role(id, agent, this.targetDirectory(agent, request.cwd));
+    const role = await this.role(id, agent, optionalString(request.cwd, 'cwd'), signal);
     const browserEvidence = role.capabilities.some(capability => capability.startsWith('browser-'))
       ? { bsk: await browserReadiness(this.ctx, signal) } : undefined;
     const view = this.roleView(role, this.names(), false, browserEvidence);
@@ -235,13 +234,13 @@ export class AgentDeckController {
     return definitionSources(layers.filter(layer => !layer.source.startsWith('user:')));
   }
   async suggest(request: JsonObject, actor?: RuntimeAgent, signal = new AbortController().signal): Promise<JsonObject> {
-    const current = await this.resolved(actor);
+    const current = await this.resolved(actor, undefined, signal);
     signal.throwIfAborted();
     const saved = current.agents.find(role => role.id === request.id);
     if (request.revision !== undefined && (!saved || agentRevision(saved) !== request.revision)) throw new Error('The role changed while editing. Reload before generating a suggestion.');
     const result = await suggestRole(this.ctx, request, signal);
     if (saved) {
-      const after = await this.resolved(actor);
+      const after = await this.resolved(actor, undefined, signal);
       if (after.blockers.length) throw new Error(`Role source cannot be read safely: ${after.blockers.map(value => `${value.source}: ${value.message}`).join('; ')}`);
       const currentRole = after.agents.find(role => role.id === saved.id);
       if (!currentRole || agentRevision(currentRole) !== agentRevision(saved)) throw new Error('The role changed during generation. Generate a fresh suggestion.');
@@ -361,9 +360,12 @@ export class AgentDeckController {
   }
   private async startOnce(runId: string, request: JsonObject, exec: ToolRunContext, parent: RuntimeAgent): Promise<JsonObject> {
     const roleId = optionalString(request.role, 'role') ?? 'general';
-    const cwd = this.targetDirectory(parent, request.cwd);
-    const role = await this.role(roleId, parent, cwd);
     const prompt = requiredString(request.prompt, 'prompt');
+    const path = request.cwd === undefined ? undefined : requiredString(request.cwd, 'cwd');
+    const { cwd, nativeCwd, expectedWorkspace } = await delegationWorkspace(this.ctx, this.compatibility.family, parent, path, exec.signal);
+    const workspace = expectedWorkspace === undefined ? {} : { expectedWorkspace };
+    exec.signal.throwIfAborted();
+    const role = await this.role(roleId, parent, cwd, exec.signal);
     const description = optionalString(request.description, 'description') ?? `${role.title.zh} / ${role.title.en}`;
     const selection = await this.selection(role, parent, request, exec.signal, true);
     const builtins = new Map(loadBuiltinSkills().map(skill => [skill.id, skill]));
@@ -372,7 +374,7 @@ export class AgentDeckController {
       const builtin = builtins.get(id);
       if (builtin) { skills.push(builtin); continue; }
       const registry = this.ctx.get('skills' as any) as any;
-      const loaded = await registry?.get(id, { scope: parent, cwd: cwd ?? this.cwd(parent), signal: exec.signal });
+      const loaded = await registry?.get(id, { scope: parent, cwd, signal: exec.signal });
       if (!loaded) throw new Error(`Required role skill is unavailable: ${id}. No child has been started.`);
       if (typeof loaded.content !== 'string' || loaded.content.length > 24_000) throw new Error(`Skill ${id} is not a complete bounded instruction resource.`);
       skills.push({ id, description: loaded.description ?? id, body: loaded.content, ...(loaded.resourceBase ? { resourceBase: jsonClone(loaded.resourceBase) } : {}) });
@@ -389,11 +391,11 @@ export class AgentDeckController {
     const webTools = role.capabilities.includes('web-research') && !!this.ctx.get('web' as any);
     const sourceRevision = agentRevision(role);
     const decision = selection.choice.decision;
-    const identity = digest({ role: sourceRevision, ...(decision ? { candidateId: decision.candidateId } : {}), skills, model: selection.effective, scriptRevisions, webTools, policyVersion: 2 });
+    const identity = digest({ role: sourceRevision, ...(decision ? { candidateId: decision.candidateId } : {}), skills, model: selection.effective, scriptRevisions, webTools, policyVersion: 2, ...workspace });
     // Only the selected route reaches the immutable child snapshot, never the candidate pool.
     const pinnedRole: AgentDefinition = role.model.mode === 'auto' ? { ...role, model: { mode: 'fixed', provider: selection.effective.provider, model: selection.effective.model },
       reasoning: selection.effective.reasoningEffort ? { mode: 'fixed', effort: selection.effective.reasoningEffort } : { mode: 'model-default' } } : role;
-    let snapshot: RoleSnapshot = { id: identity, presetId: `agentdeck-${role.id}-${identity.slice(0, 16)}`, role: jsonClone(pinnedRole), sourceRevision, ...(decision ? { candidateId: decision.candidateId } : {}), skills: jsonClone(skills), model: { provider: selection.effective.provider, model: selection.effective.model, ...(selection.effective.reasoningEffort ? { reasoningEffort: selection.effective.reasoningEffort } : {}), ...(selection.metadata.contextWindow ? { contextWindow: selection.metadata.contextWindow } : {}) }, scriptRevisions, webTools, createdAt: Date.now(), policyVersion: 2 };
+    let snapshot: RoleSnapshot = { id: identity, presetId: `agentdeck-${role.id}-${identity.slice(0, 16)}`, role: jsonClone(pinnedRole), sourceRevision, ...(decision ? { candidateId: decision.candidateId } : {}), skills: jsonClone(skills), model: { provider: selection.effective.provider, model: selection.effective.model, ...(selection.effective.reasoningEffort ? { reasoningEffort: selection.effective.reasoningEffort } : {}), ...(selection.metadata.contextWindow ? { contextWindow: selection.metadata.contextWindow } : {}) }, scriptRevisions, webTools, createdAt: Date.now(), policyVersion: 2, ...workspace };
     await this.store.snapshot(snapshot);
     let presetId: string | undefined = snapshot.presetId;
     let fallback: RunRecord['fallback'];
@@ -419,13 +421,13 @@ export class AgentDeckController {
         description: `AgentDeck ${runId}: ${description}`,
         prompt: `AgentDeck task ${runId}. Role ${role.id}, revision ${snapshot.id}.\n\n${prompt}\n\nPreserve the authorized task scope. Report evidence, coverage, limitations and unfinished work; never claim a missing check passed.`,
         ...selection.nativeFields,
-        ...(cwd === undefined ? {} : { cwd }),
+        ...(nativeCwd === undefined ? {} : { cwd: nativeCwd }),
       }, exec, snapshot);
       const accepted: RunRecord = { ...run, childId, phase: 'accepted' };
       await this.store.run(accepted);
       return { ...accepted, status: 'started', completion: 'The native runtime will notify the parent; read details only when needed.' };
     } catch (error) {
-      const failed: RunRecord = { ...run, phase: error instanceof NativeDelegationFailure && error.beforeDispatch ? 'failed' : 'uncertain', error: messageOf(error) };
+      const failed: RunRecord = { ...run, phase: error instanceof NativeDelegationFailure && error.noChildAccepted ? 'failed' : 'uncertain', error: messageOf(error) };
       await this.store.run(failed);
       throw new Error(`${failed.error}\nStartup receipt ${runId}: ${failed.phase}. Do not automatically re-run the full task or route around a policy refusal.`);
     }
@@ -445,6 +447,12 @@ export class AgentDeckController {
       const snapshot = this.store.snapshots().find(value => value.id === run.revision);
       if (!snapshot) throw new Error('This task is missing its immutable snapshot; do not reroute or restart it.');
       await this.presets.verify(snapshot.presetId);
+      if (this.compatibility.family === 'live-policy') {
+        const expected = snapshot.expectedWorkspace ?? await migratedWorkspace(this.ctx, run, snapshot, childId, signal);
+        using observation = await this.ctx.sessionQuery.observeSession(SessionId(childId), { signal });
+        checkProjectedWorkspace(this.ctx, expected, observation.projections?.values.workingDirectory);
+        await verifyWorkspaceDirectory(this.ctx, expected, signal);
+      }
       signal.throwIfAborted();
       const content = requiredString(request.message, 'message');
       const messageId = await this.native.send(actor, childId, content, signal);
@@ -463,7 +471,7 @@ export class AgentDeckController {
     const snapshot = this.store.snapshots().find(value => value.id === run.revision);
     const diagnostics = snapshot ? await this.presets.audit([snapshot.presetId], signal) : ['This task is missing its immutable role snapshot.'];
     signal.throwIfAborted();
-    const result = await readRunResult(this.sessions, run, request.offset ?? 0, request.limit ?? 12_000, request.resultRevision, signal);
+    const result = await readRunResult(this.sessions, run, request.offset ?? 0, request.limit ?? 12_000, request.resultRevision, signal, request.section);
     return { ...result, diagnostics: [...diagnostics, ...(Array.isArray(result.diagnostics) ? result.diagnostics : [])] };
   }
   private async reconcile(run: RunRecord, signal?: AbortSignal): Promise<RunRecord> {
@@ -495,6 +503,7 @@ export class AgentDeckController {
   async operation(name: string, payload: unknown, actor?: RuntimeAgent, signal = new AbortController().signal): Promise<JsonObject> {
     const request = object(payload ?? {});
     switch (name) {
+      case 'captureWorkspaceCuts': return captureWorkspaceCuts(this.ctx, this.store, signal);
       case 'catalog': return this.catalog(actor, signal, request.cwd);
       case 'models': return this.models(actor, request, signal);
       case 'preview': return this.preview(requiredString(request.id, 'id'), actor, signal, request);

@@ -2,6 +2,13 @@
 
 Notable source changes are recorded here. Version numbers identify the project source; they do not imply an npm publication or a GitHub Release.
 
+## 0.3.2 — DSH Alpha compatibility
+
+- Support DSH `0.2.2-rc.1` through `rc.5` and `0.2.3-alpha.2`. On Alpha, honor its current model policy and inherit the calling Session's workspace. Match recorded workspace evidence before resuming older RC tasks.
+- Read Alpha role configuration from the verified workspace path. A temporary change to a workspace symlink can no longer select another project's instructions for a child.
+- Record confirmed capacity refusals as failed launches and preserve the final feedback from DSH's tool pipeline.
+- Show when model authorization is waiting on Session selection. Check browser readiness separately, and verify the packaged plugin and upgrade paths across all six supported hosts.
+
 ## 0.3.1 — Task and project reliability
 
 - Resolve saved role definitions and their parents against the target project's configuration. Use the same working directory for discovery, preview and startup, and show the effective configuration source in the management page.

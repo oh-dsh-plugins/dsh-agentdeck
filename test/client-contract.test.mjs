@@ -400,6 +400,42 @@ test('result paging uses nextOffset and does not fabricate completion from idle'
   controller.dispose();
 });
 
+test('native stop pages stay separate from result text and share its revision', async () => {
+  let revision = 'same';
+  const { controller, calls } = harness(({ payload }) => {
+    if (payload.section === 'nativeStop') return ok({
+      childId: payload.childId, section: 'nativeStop', resultRevision: revision, totalCharacters: 10,
+      rawText: payload.offset ? 'tail' : 'reason', ...(payload.offset ? {} : { nextOffset: 6 }),
+    });
+    return ok({ childId: payload.childId, status: 'failed', resultRevision: revision,
+      rawText: payload.offset ? 'body' : '', totalCharacters: 4, nativeStopTruncated: true,
+      ...(payload.childId === 'child-with-text' && !payload.offset ? { rawText: 'first', totalCharacters: 9, nextOffset: 5 } : {}),
+    });
+  });
+  try {
+    await controller.loadResult('child-with-text');
+    await controller.loadNativeStop('child-with-text');
+    await controller.loadResult('child-with-text', true);
+    await controller.loadNativeStop('child-with-text');
+    assert.equal(controller.getSnapshot().result.rawText, 'firstbody');
+    assert.equal(controller.getSnapshot().result.nativeStopPage.rawText, 'reasontail');
+    assert.equal(controller.getSnapshot().result.nativeStopPage.nextOffset, undefined);
+    assert.deepEqual(calls.filter(call => call.payload.section === 'nativeStop').map(call => [call.payload.offset, call.payload.resultRevision]), [[0, 'same'], [6, 'same']]);
+    await controller.loadResult('child-without-text');
+    assert.equal(controller.getSnapshot().result.nativeStopPage, undefined);
+    revision = 'changed';
+    const stale = await controller.loadNativeStop('child-without-text');
+    assert.equal(stale.error.code, 'AGENTDECK_RESULT_CHANGED');
+    assert.equal(controller.getSnapshot().resultStale, true);
+    await controller.loadResult('child-without-text');
+    await controller.loadNativeStop('child-without-text');
+    assert.equal(controller.getSnapshot().result.rawText, '');
+    assert.equal(controller.getSnapshot().result.nativeStopPage.rawText, 'reason');
+    controller.closeResult();
+    assert.equal(controller.getSnapshot().result, null);
+  } finally { controller.dispose(); }
+});
+
 test('a stale result page preserves loaded text and a first-page reload replaces it', async () => {
   let revision = 'old';
   const run = { id: 'run', childId: 'child-a', parentId: 'parent', phase: 'accepted', nativeStatus: 'running' };
@@ -718,7 +754,10 @@ test('refresh cancels an older preview before waiting for the new catalog', asyn
 test('role badges distinguish authorization from capabilities and keep default authorization in the list', () => {
   const denied = { ...general, capabilitiesAvailable: true, available: false, authorization: { status: 'denied' }, configuredSelection: { provider: 'q', model: 'large' } };
   assert.equal(plugin.roleStatus(denied), 'modelDenied');
-  assert.equal(plugin.roleStatus({ ...denied, authorization: { status: 'unknown' } }), 'authorizationUnknown');
+  const unknown = { ...denied, authorization: { status: 'unknown' } };
+  assert.equal(plugin.roleStatus(unknown), 'authorizationUnknown');
+  assert.equal(plugin.roleStatus(unknown, false, false), 'noSession');
+  assert.equal(plugin.roleStatus({ ...unknown, unverifiedCapabilities: ['browser-observe'] }, false, false), 'capabilityUnknown');
   assert.equal(plugin.roleStatus({ ...denied, enabled: false }), 'disabled');
   assert.equal(plugin.roleStatus({ ...denied, authorization: { status: 'authorized' }, available: true }), 'available');
   const selectedCandidate = { ...denied, available: true, authorization: { status: 'authorized' }, configuredSelection: { provider: 'p', model: 'm' }, browserSupport: { state: 'ready' } };

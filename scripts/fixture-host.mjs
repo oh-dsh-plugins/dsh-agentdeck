@@ -20,8 +20,8 @@ import {
 } from '../scripts/probe-native.mjs';
 
 let serial = 0;
-export async function fixture({ holdChild = false, subprocess = true, allowNativeFallback = false, policy, web = false, parentCompaction = false, omitRecovery = false, directory, resumeSessionId } = {}) {
-  const h = await createNativeHarness({ holdChild, policy, directory, resumeSessionId });
+export async function fixture({ holdChild = false, subprocess = true, allowNativeFallback = false, policy, web = false, parentCompaction = false, omitRecovery = false, directory, resumeSessionId, parentSessionId, plugin = AgentDeck, beforeActivation } = {}) {
+  const h = await createNativeHarness({ holdChild, policy, directory, resumeSessionId, parentSessionId, beforeActivation });
   const webCalls = [];
   const webReadyCalls = [];
   let hostFiber;
@@ -70,10 +70,10 @@ export async function fixture({ holdChild = false, subprocess = true, allowNativ
     h.parent.options.maxTokens = 1536;
     const config = { customAgentDirs: [], projectConfigDirectory: '.dsh/agentdeck', allowNativeFallback };
     const mountHost = async () => {
-      hostFiber = ctx.plugin(AgentDeck, config);
+      hostFiber = ctx.plugin(plugin, config);
       await bounded(hostFiber, 'actual AgentDeck Host plugin');
     };
-    await mountHost();
+    if (plugin) await mountHost();
     const call = async (name, args = {}, { id = `host-call-${++serial}`, agent = h.parent, signal = new AbortController().signal, toolSet } = {}) => {
       const batch = await bounded(ctx.tools.execute({
         calls: [{ type: 'tool-call', id, name, arguments: JSON.stringify(args) }], agent, signal,

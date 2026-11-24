@@ -5,13 +5,9 @@ import { request as httpRequest } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { Context } from '@deepseek-ai/cordis';
 import Loader, { Group } from '@deepseek-ai/cordis-plugin-loader';
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry';
 import * as Connection from '@deepseek-ai/dsh-client-connection';
-import { installConnection } from '@deepseek-ai/dsh-client-connection/client';
-import CredentialProvider from '@deepseek-ai/dsh-credentials';
-import { WebServer } from '@deepseek-ai/dsh-host-webserver';
 import SkillRegistry from '@deepseek-ai/dsh-skill';
 import Storage from '@deepseek-ai/dsh-storage';
 import * as StorageJson from '@deepseek-ai/dsh-storage-json';
@@ -21,68 +17,30 @@ import TokenMeter from '@deepseek-ai/dsh-token-meter';
 import * as AgentDeck from '../lib/index.js';
 import { ROUTE, bounded, createNativeHarness, deferred } from '../scripts/probe-native.mjs';
 
-// This provider contains only newly generated fixture authentication records.
-// It never reads environment variables, the keychain, or a live profile.
-class EphemeralCredentials extends CredentialProvider {
-  records = new Map();
-  async resolve() { return undefined; }
-  async describe() { return { configured: false, writable: false }; }
-  async set() { throw new Error('Reference credentials are outside this fixture.'); }
-  async unset() { throw new Error('Reference credentials are outside this fixture.'); }
-  async readRecord(key) { return this.records.get(key); }
-  async describeRecord(key) { const record = this.records.get(key); return { configured: !!record, writable: true, ...(record ? { kind: record.kind } : {}) }; }
-  async listRecords() { return [...this.records].map(([key, record]) => ({ key, kind: record.kind })); }
-  async modifyRecord(key, mutate) { const next = await mutate(this.records.get(key)); if (next !== undefined) this.records.set(key, next); return this.records.get(key); }
-  async deleteRecord(key) { this.records.delete(key); }
-}
+import { ownerConnection } from '../scripts/fixture-web.mjs';
 
 async function fixture({ loadHost = true } = {}) {
   const h = await createNativeHarness();
-  const client = new Context();
   let hostFiber;
-  let origin;
-  const requests = [];
+  let owner;
   try {
-    const hostModules = dirname(dirname(dirname(fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-tools/package.json')))));
+    const nativeTools = import.meta.resolve('@deepseek-ai/dsh-tools/package.json');
+    const hostModules = dirname(dirname(dirname(fileURLToPath(nativeTools))));
     await writeFile(join(h.storageRoot, 'package.json'), JSON.stringify({ name: 'agentdeck-rpc-native-fixture', type: 'module', private: true }));
     await symlink(hostModules, join(h.storageRoot, 'node_modules'), 'dir');
     const ctx = h.ctx.extend({ baseUrl: pathToFileURL(join(h.storageRoot, 'package.json')).href });
     await bounded(ctx.plugin(Loader, { baseUrl: ctx.baseUrl }), 'RPC Loader');
     ctx.get('loader').builtins.group = Group;
-    for (const plugin of [Storage, SkillRegistry, TokenMeter, LocalSubprocess, EphemeralCredentials]) await bounded(ctx.plugin(plugin), plugin.name);
+    for (const plugin of [Storage, SkillRegistry, TokenMeter, LocalSubprocess]) await bounded(ctx.plugin(plugin), plugin.name);
     await bounded(ctx.plugin(StorageJson, { root: join(h.storageRoot, 'rpc-domain') }), 'RPC JSON storage');
     await bounded(ctx.plugin(StorageDomain, { backend: 'json' }), 'RPC storage domain');
     await bounded(ctx.plugin(AgentPresetRegistry, { default: 'fixture-standard' }), 'RPC preset registry');
     await bounded(ctx.get('agentPresets').register({ id: 'fixture-standard', name: 'Fixture parent', plugins: [] }), 'RPC parent preset');
     h.parent.options.maxTokens = 1536;
-    await bounded(ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }), 'ephemeral native HTTP listener');
-    await bounded(ctx.plugin(Connection), 'native authenticated Connection');
-    const connection = ctx.get('connection');
-    assert.ok(connection instanceof Connection.HostConnectionService);
-    origin = ctx.get('webServer').getOrigin();
-    ctx.get('webServer').register({ kind: 'exact', path: '/', handler(req, res) {
-      if (connection.authorizeIndex(req, res)) { res.writeHead(200); res.end('fixture'); }
-    } });
-    const login = await fetch(connection.authenticatedUrl(`${origin}/`), { redirect: 'manual' });
-    assert.equal(login.status, 303);
-    const cookie = login.headers.get('set-cookie')?.split(';', 1)[0];
-    assert.ok(cookie);
-    await login.arrayBuffer();
+    owner = await ownerConnection(ctx);
     // The shared /api interceptor is intentionally occupied before Host mounts,
     // exactly as the native API Gateway owns it in the running application.
-    connection.rpc.intercept('/api', endpoint => endpoint === 'fixture.core', async () => ({ ok: true, value: { core: true } }));
-    await bounded(client.plugin({ name: 'fixture-native-http-client', apply(clientCtx) {
-      // installConnection constructs the native createWebConnectionRpc internally;
-      // that factory is not exported by the installed public ./client entry.
-      installConnection(clientCtx, { transport: { fetch: async (path, init) => {
-        const headers = new Headers(init.headers);
-        headers.set('cookie', cookie);
-        const response = await fetch(new URL(path, `${origin}/`), { ...init, headers });
-        requests.push({ path: String(path), status: response.status });
-        return response;
-      } } });
-    } }), 'native HTTP RPC client');
-    const rpc = client.get('connection').rpc;
+    ctx.get('connection').rpc.intercept('/api', endpoint => endpoint === 'fixture.core', async () => ({ ok: true, value: { core: true } }));
     const mountHost = async () => {
       hostFiber = ctx.plugin(AgentDeck, { customAgentDirs: [], projectConfigDirectory: '.dsh/agentdeck' });
       await bounded(hostFiber, 'actual Host RPC registration');
@@ -95,13 +53,13 @@ async function fixture({ loadHost = true } = {}) {
     };
     if (loadHost) await mountHost();
     return {
-      h, ctx, rpc, requests, origin, cookie,
+      h, ctx, ...owner,
       async disposeHost() { await hostFiber.dispose(); },
       reloadHost: async () => { await hostFiber.dispose(); await mountHost(); },
-      async close() { try { await hostFiber?.dispose(); } finally { try { await client.fiber.dispose(); } finally { await h.close(); } } },
+      async close() { try { await hostFiber?.dispose(); } finally { try { await owner.close(); } finally { await h.close(); } } },
     };
   } catch (error) {
-    try { await hostFiber?.dispose(); } finally { try { await client.fiber.dispose(); } finally { await h.close(); } }
+    try { await hostFiber?.dispose(); } finally { try { await owner?.close(); } finally { await h.close(); } }
     throw error;
   }
 }

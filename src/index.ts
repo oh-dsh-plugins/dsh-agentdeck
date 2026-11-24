@@ -6,6 +6,7 @@ import { AgentDeckStore, WriteOutcomeUnknownError } from './host/store.js';
 import { AgentDeckController, ChangeImpactError } from './host/controller.js';
 import { ResultRevisionError } from './host/results.js';
 import { SuggestionError } from './host/suggestions.js';
+import { hostCompatibility, WorkspaceCompatibilityError } from './host/compatibility.js';
 import { object, requiredString, optionalString, messageOf, jsonClone } from './host/types.js';
 import type { HostContext, RuntimeAgent, JsonObject } from './host/types.js';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
@@ -21,8 +22,9 @@ const output = {
 
 export async function apply(context: HostContext, config: { customAgentDirs: string[]; projectConfigDirectory: string; allowNativeFallback: boolean }): Promise<void> {
   const ctx = context;
+  const compatibility = hostCompatibility();
   const store = await AgentDeckStore.open(ctx);
-  const controller = new AgentDeckController(ctx, store, config);
+  const controller = new AgentDeckController(ctx, store, config, undefined, compatibility);
   ctx.effect(() => () => controller.dispose(), 'AgentDeck runtime');
   await controller.restore();
 
@@ -92,8 +94,8 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
   });
   const result = defineTool({
     name: 'scene_agent_result',
-    description: 'Read evidence and paged final output of your AgentDeck child when the native completion notice is insufficient. To continue, pass nextOffset as offset and include resultRevision from the first page. Reload the first page if the result changes. Inspect status and coverage before accepting success. This read does not resume or repeat the task.',
-    parameters: { childId: { type: 'string', required: true }, offset: { type: 'number' }, limit: { type: 'number' }, resultRevision: { type: 'string' } },
+    description: 'Read evidence and paged output of your AgentDeck child. Use section nativeStop to read the complete native stop reason separately. Continue with the same section, nextOffset as offset, and resultRevision. Reload the first page if the result changes. Inspect status and coverage before accepting success. This read does not resume or repeat the task.',
+    parameters: { childId: { type: 'string', required: true }, offset: { type: 'number' }, limit: { type: 'number' }, resultRevision: { type: 'string' }, section: { type: 'string', enum: ['nativeStop'] } },
     output, isConcurrencySafe: () => true,
     async execute(args: any, exec: ToolRunContext) {
       if (!exec.agent) throw new Error('Result access requires a real parent Agent.');
@@ -135,7 +137,7 @@ export async function apply(context: HostContext, config: { customAgentDirs: str
         const code = error instanceof ChangeImpactError ? error.code
           : error instanceof ResultRevisionError ? 'AGENTDECK_RESULT_CHANGED'
           : error instanceof WriteOutcomeUnknownError ? 'AGENTDECK_WRITE_OUTCOME_UNKNOWN'
-          : error instanceof SuggestionError ? error.code : 'AGENTDECK_OPERATION_FAILED';
+          : error instanceof SuggestionError || error instanceof WorkspaceCompatibilityError ? error.code : 'AGENTDECK_OPERATION_FAILED';
         return { ok: false, error: { code, message: messageOf(error), details: error instanceof SuggestionError ? error.details : {} } };
       }
     }), 'AgentDeck owner RPC');

@@ -8,6 +8,7 @@ import { toolAllowed } from './host/capabilities.js';
 import { registerRoleTools } from './host/role-tools.js';
 import { activateBrowserSkill, browserInvocationDenial, inspectBrowserSupport, type BrowserSupport } from './host/browser.js';
 import { browserReadiness, OwnedBrowserSessions } from './host/browser-runtime.js';
+import { checkWorkspace, fenceWorkspace, roleWorkspace } from './host/workspace.js';
 import { jsonClone, type HostContext, type RoleSnapshot, type RuntimeAgent } from './host/types.js';
 
 export const name = 'agentdeck-role';
@@ -72,11 +73,21 @@ export function bindRoleAgent(context: HostContext, agent: RuntimeAgent, input: 
     return existing.ready;
   }
   const snapshot = jsonClone(input);
+  let releaseWorkspace: (() => void) | undefined;
   const ready = (async () => {
     if (snapshot.policyVersion !== 1 && snapshot.policyVersion !== 2) throw new Error(`Unsupported AgentDeck role policy ${snapshot.policyVersion}.`);
     const legacy = snapshot.policyVersion === 1;
     const maximum = legacy ? ceiling(snapshot) : undefined;
     const ctx = agent.ctx as HostContext;
+    const expectedWorkspace = await roleWorkspace(ctx, agent, snapshot, signal);
+    releaseWorkspace = expectedWorkspace === undefined ? undefined : fenceWorkspace(ctx, agent, expectedWorkspace);
+    const ensureWorkspace = async (control: AbortSignal) => {
+      if (expectedWorkspace === undefined) return;
+      const directories = ctx.get('workingDirectory');
+      if (!directories) throw new Error('AgentDeck requires the native workingDirectory service.');
+      checkWorkspace(expectedWorkspace, await directories.ensure(agent, control));
+    };
+    await ensureWorkspace(signal);
     const current = agent.model.current();
     if (current?.provider !== snapshot.model.provider || current?.model !== snapshot.model.model) throw new Error('AgentDeck snapshot model route differs from this Agent; create an authorized snapshot for its current route.');
     const llm = ctx.get('llm' as any) as any;
@@ -126,7 +137,16 @@ export function bindRoleAgent(context: HostContext, agent: RuntimeAgent, input: 
     finally { discovery.dispose(); }
     let observed: { presentation: PromptPresentation; toolSet?: any } | undefined;
     const browsers = browserSupport.backend === 'bsk' ? new OwnedBrowserSessions(ctx, agent) : undefined;
+    await ensureWorkspace(signal);
     return ctx.effect(function* () {
+      if (releaseWorkspace) {
+        yield releaseWorkspace;
+        yield ctx.on('agent/pre-step', async (payload, next) => {
+          const decision = await next();
+          if (decision.kind === 'enter') await ensureWorkspace(payload.signal);
+          return decision;
+        });
+      }
       // Include dynamic MCP/tool-provider declarations in the frozen allowed set.
       yield ctx.tools.restrict({ allow: allowed });
       yield ctx.tools.guard((execution: any) => {
@@ -176,7 +196,10 @@ export function bindRoleAgent(context: HostContext, agent: RuntimeAgent, input: 
       }
       yield () => attached.delete(agent);
     });
-  })();
+  })().catch(error => {
+    releaseWorkspace?.();
+    throw error;
+  });
   attached.set(agent, { id: snapshot.id, ready });
   ready.catch(() => { if (attached.get(agent)?.ready === ready) attached.delete(agent); });
   return ready;

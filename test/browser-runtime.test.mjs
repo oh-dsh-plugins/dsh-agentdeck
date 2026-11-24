@@ -90,7 +90,7 @@ async function nativeBrowserFixture(t, { holdChild = false } = {}) {
     const browserFiber = await h.ctx.plugin(Object.assign((ctx, config) => Browser.apply(ctx, config, { runnerFactory: () => runner, startJournal: journal }), { inject: ['tools'] }), { bskPath: binary, lazyTools: true, observationEnabled: false });
     await h.ctx.plugin(ctx => { ctx.provide('configEditor', { entries: () => [{ options: { name: '@wxg-prc-cpg/browser-skill-dsh-plugin' }, fiber: browserFiber }] }); });
     handle = await h.ctx.agents.create({ sessionId: 'native-browser-owned-proof', meta: { cwd: h.storageRoot }, agentOptions: ROUTE, setup: async (ctx, agent) => {
-      stopRole = await bindRoleAgent(ctx, agent, { id: 'browser-owned-proof', presetId: 'browser-owned-proof', policyVersion: 1, createdAt: 1, model: ROUTE,
+      stopRole = await bindRoleAgent(ctx, agent, { id: 'browser-owned-proof', presetId: 'browser-owned-proof', policyVersion: 1, createdAt: 1, model: ROUTE, expectedWorkspace: h.storageRoot,
         role: { schemaVersion: 1, id: 'ui-verifier', title: { en: 'Browser proof', zh: '浏览器验证' }, description: { en: 'Inspect delegated page', zh: '检查页面' }, instructions: 'Inspect only the delegated page.', capabilities: ['browser-observe', 'browser-interact'], skills: [], scripts: [], inputs: [], deliverables: [], model: { mode: 'inherit' }, reasoning: { mode: 'model-default' }, context: { targetTokens: 10000, elasticTokens: 32000 }, enabled: true },
         skills: [], budget: { known: false, targetTokens: 10000, elasticTokens: 32000, headroomTokens: 0, diagnostics: [] } });
     } });

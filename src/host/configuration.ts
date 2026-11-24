@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { resolveCatalog } from '../core/index.js';
 import type { AgentDefinition } from '../core/index.js';
 import { messageOf } from './types.js';
+import { requireInheritedWorkspace } from './compatibility.js';
 import type { HostContext, RuntimeAgent, OverrideRecord } from './types.js';
 
 export type RoleLayer = { source: string; text: string; failure?: string };
@@ -73,12 +74,45 @@ export class RoleCatalogs {
     return this.overrides().map(value => ({ source: 'user:' + value.id, text: value.text }));
   }
 
-  private projectRoot(agent?: RuntimeAgent): string | undefined {
-    const cwd = this.cwd(agent);
-    return cwd ? resolve(cwd) : undefined;
+  private async projectRoot(agent?: RuntimeAgent, signal?: AbortSignal): Promise<string | undefined> {
+    signal?.throwIfAborted();
+    if (!agent) return undefined;
+    const current = this.cwd(agent);
+    if (!current) return undefined;
+    const cwd = resolve(current);
+    const directories = this.ctx.get('workingDirectory');
+    const fs = this.ctx.get('fs');
+    if (!directories || !fs) return cwd;
+
+    // Predict native recovery for role lookup without committing a Session change.
+    const target = await fs.resolve(current, { signal });
+    const info = await fs.stat(target, signal);
+    signal?.throwIfAborted();
+    if (info?.type === 'directory') return cwd;
+    const original = agent.session.header.cwd ?? directories.defaultDirectory;
+    if (original === current) return cwd;
+    const fallback = await fs.resolve(original, { cwd: original, signal });
+    const restored = await fs.stat(fallback, signal);
+    signal?.throwIfAborted();
+    // Keep the catalog accessible when there is no recoverable directory.
+    return restored?.type === 'directory' ? resolve(fs.processPath(fallback)) : cwd;
   }
 
-  async read(agent?: RuntimeAgent, project = this.projectRoot(agent)): Promise<RoleCatalog & { project?: string }> {
+  async read(agent?: RuntimeAgent, cwd?: string, signal?: AbortSignal, inheritWorkspace = false): Promise<RoleCatalog & { project?: string }> {
+    let project: string | undefined;
+    if (agent && inheritWorkspace) {
+      project = await this.projectRoot(agent, signal);
+      if (cwd !== undefined) {
+        if (!project) throw new Error('A workspace selection requires the calling Session working directory.');
+        project = await requireInheritedWorkspace(this.ctx, project, cwd, signal);
+      }
+    } else if (cwd !== undefined && isAbsolute(cwd)) project = resolve(cwd);
+    else {
+      const base = await this.projectRoot(agent, signal);
+      if (base) project = resolve(base, cwd ?? '.');
+      else if (cwd !== undefined) throw new Error('A relative cwd requires the calling Session working directory.');
+    }
+    signal?.throwIfAborted();
     const user = this.userLayers();
     const layers = await Promise.all([...this.sharedDirectories, ...(project ? [join(project, this.projectDirectory)] : [])].map(readLayers));
     return { ...catalogFrom([...user, ...layers.flat()]), project };
@@ -86,7 +120,7 @@ export class RoleCatalogs {
 
   async forWrite(actor?: RuntimeAgent, signal?: AbortSignal): Promise<ConfigurationSnapshot> {
     const user = this.userLayers();
-    const current = this.projectRoot(actor);
+    const current = await this.projectRoot(actor, signal);
     const records = await this.ctx.get('sessionQuery')?.listSessions?.(signal) ?? [];
     signal?.throwIfAborted();
     const roots = new Set<string>();
@@ -95,8 +129,8 @@ export class RoleCatalogs {
       if (record.header.cwd) roots.add(resolve(record.header.cwd));
     }
     for (const agent of this.ctx.agents.list()) {
-      const cwd = this.projectRoot(agent);
-      if (cwd) roots.add(cwd);
+      const cwd = this.cwd(agent);
+      if (cwd) roots.add(resolve(cwd));
     }
     const shared = (await Promise.all(this.sharedDirectories.map(readLayers))).flat();
     const projects = new Map<string, RoleLayer[]>();

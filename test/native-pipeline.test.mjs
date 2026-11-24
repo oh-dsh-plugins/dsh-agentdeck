@@ -3,7 +3,7 @@ import { access } from 'node:fs/promises';
 import test from 'node:test';
 import {
   PRIVATE_TOOL, ROUTE, bounded, createNativeHarness, deferred,
-  noticeMessages, proveNativeSuccess,
+  liveHost, noticeMessages, proveNativeSuccess,
 } from '../scripts/probe-native.mjs';
 
 const textOf = (result) => result.content
@@ -85,8 +85,8 @@ test('explicit fields enforce parent route when the calling Session has no model
   try {
     const result = await h.invoke({ provider: ROUTE.provider, model: 'forbidden' });
     assert.equal(result.isError, true);
-    assert.match(textOf(result), /not allowed for this Session/);
-    assert.match(textOf(result), /without a recorded model-selection policy/);
+    if (liveHost) assert.match(textOf(result), /not allowed by the current subagent model selection setting/);
+    else assert.match(textOf(result), /not allowed for this Session.*without a recorded model-selection policy/s);
     assert.equal(h.adapter.resolutions.length, 0, 'policy must deny before adapter lookup');
     assert.equal(h.starts.length, 0);
   } finally {
@@ -106,7 +106,7 @@ test('native route policy rejects incomplete or forbidden selections and preserv
     ]) {
       const result = await h.invoke(fields);
       assert.equal(result.isError, true);
-      assert.match(textOf(result), /not allowed for this Session/);
+      assert.match(textOf(result), liveHost ? /not allowed by the current subagent model selection setting/ : /not allowed for this Session/);
     }
     const effortOnly = await h.invoke({ reasoning_effort: 'high' });
     assert.equal(effortOnly.isError, true);

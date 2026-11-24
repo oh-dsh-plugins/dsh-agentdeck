@@ -26,9 +26,9 @@ AgentDeck does not add a classifier model or a separate execution loop. Configur
 
 | Component | Supported baseline |
 | --- | --- |
-| AgentDeck | `0.3.1` |
-| DeepSeek Harness | **`>=0.2.2-rc.1`**; published-host verification covers `rc.1` through `rc.5`; future releases require the same behavior checks |
-| Node.js | `>=24.9.0` |
+| AgentDeck | `0.3.2` |
+| DeepSeek Harness (source build) | `0.2.2-rc.1` through `rc.5`, plus `0.2.3-alpha.2` as exact release targets |
+| Node.js | `>=24.9.0` for the plugin. DSH `0.2.3-alpha.2` requires `^24.22.3 || >=26.13.1`. |
 | Development environment | DSH CLI on `PATH`; the host-link helper uses a POSIX shell |
 | Optional capabilities | Existing web providers, native tools, or a supported browser integration |
 
@@ -36,21 +36,31 @@ DSH supplies its own peer packages. Do not independently upgrade them inside an 
 
 ## Installation
 
-Install the release from npm into a compatible DSH profile:
+For local acceptance before publication, install the archive from [Build from source](#build-from-source) into a test profile. Use the archive path to select the build under test.
+
+Once this version is published, install it from npm:
 
 ```sh
-dsh plugin --profile web add dsh-agentdeck@0.3.1
+dsh plugin --profile web add dsh-agentdeck@0.3.2
 ```
 
 Use your actual profile name instead of `web`. The DSH plugin manager installs the package and applies its native bundle patch. Restart DSH when the manager requests it, then refresh the existing Harness page.
 
+### Upgrade DSH from RC to Alpha
+
+1. Let active tasks settle on RC and pause new work. Install the local AgentDeck archive while the profile is still on RC.
+2. Restart the same RC Web profile and leave the parent Sessions unopened. Go directly to **AgentDeck → Diagnostics → Record workspaces for the DSH upgrade**. Resolve any pending items on RC, then restart and record again. A stopped Session can still be resident until DSH restarts.
+3. Once the recording reports zero pending items, stop RC with the Sessions still unopened. Preserve an isolated copy of its profile and Session storage, along with the referenced workspace paths. Then open the working profile on Alpha.
+
+On Alpha, each new child inherits the calling Session's workspace. Select a Session already in the intended workspace to delegate there. Explicit model selections use the current DSH Host setting. An RC child can resume on Alpha only with a matching workspace record and effective native directory. For a paused legacy child, use the isolated RC copy with the original workspace to recover it. Alpha writes workspace events that older DSH readers cannot open. Keep the post-upgrade data separately.
+
 ### GitHub Release archive
 
-Download `dsh-agentdeck-0.3.1.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
+Download `dsh-agentdeck-0.3.2.tgz` and `SHA256SUMS` from [GitHub Releases](https://github.com/oh-dsh-plugins/dsh-agentdeck/releases/latest). The `.tgz` asset is the compiled npm installation package; GitHub's automatic source archives do not include the runtime build.
 
 ```sh
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-agentdeck-0.3.1.tgz
+dsh plugin --profile web add ./dsh-agentdeck-0.3.2.tgz
 ```
 
 ### Build from source
@@ -65,7 +75,7 @@ npm run dev:link-host
 npm run build
 mkdir -p artifacts
 npm pack --ignore-scripts --pack-destination artifacts
-dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.3.1.tgz
+dsh plugin --profile web add ./artifacts/dsh-agentdeck-0.3.2.tgz
 ```
 
 Use your actual profile name instead of `web`. `dev:link-host` locates the installed DSH CLI and links its existing public peer packages into this checkout; it does not edit the host or active profile. Set `AGENTDECK_DSH_ROOT` to the installed DSH package directory if the CLI is elsewhere.

@@ -3,8 +3,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { hostPackages } from './host-packages.mjs';
@@ -14,10 +14,17 @@ const source = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const root = resolve(option('--root') ?? join(source, '.agentdeck-dev', 'compatibility'));
-const versions = (option('--versions') ?? '0.2.2-rc.1,0.2.2-rc.2,0.2.2-rc.3,0.2.2-rc.4,0.2.2-rc.5').split(',');
-assert.ok(versions.length && new Set(versions).size === versions.length);
-for (const version of versions) assert.match(version, /^[0-9]+[.][0-9]+[.][0-9]+(?:-[A-Za-z0-9.-]+)?$/);
-const env = { ...process.env }; delete env.NODE_PATH; delete env.NODE_OPTIONS; delete env.AGENTDECK_DSH_ROOT;
+const sourceManifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+const declared = sourceManifest.engines.dsh.split(/\s*\|\|\s*/);
+const selected = option('--versions')?.split(',') ?? declared;
+assert.ok(selected.length && new Set(selected).size === selected.length);
+for (const version of selected) assert.ok(declared.includes(version), `Unsupported DSH matrix version: ${version}`);
+// The manifest orders source hosts before their persisted-upgrade targets.
+const versions = declared.filter(version => selected.includes(version));
+const env = { ...process.env };
+for (const key of Object.keys(env)) {
+  if (key.startsWith('DSH_') || ['NODE_PATH', 'NODE_OPTIONS', 'AGENTDECK_DSH_ROOT'].includes(key)) delete env[key];
+}
 const marker = join(root, '.agentdeck-compatibility.json');
 await mkdir(root, { recursive: true });
 try { assert.equal(JSON.parse(await readFile(marker, 'utf8')).purpose, 'agentdeck-isolated-compatibility'); }
@@ -71,8 +78,22 @@ async function prepare(version) {
   assert.equal(JSON.parse(await readFile(join(host, 'package.json'), 'utf8')).version, version);
   console.log('Prepared DSH ' + version);
 }
+async function verifyNativeProfile(host, cell, version, archive, sha256) {
+  const isolation = await mkdtemp(join(cell, 'native-profile-'));
+  const patch = join(isolation, 'presets.patch.yml');
+  const bootEnv = {
+    DSH_HOME: join(isolation, 'home'), DSH_AGENTS_HOME: join(isolation, 'agents'),
+    pnpm_config_store_dir: join(root, 'native-pnpm-store'),
+    PATH: dirname(process.execPath) + delimiter + env.PATH,
+  };
+  await writeFile(patch, '- insert:\n    - id: fixture-preset-registry\n      name: "@deepseek-ai/dsh-agent-preset-registry"\n      config:\n        default: fixture-standard\n');
+  const hostManifest = JSON.parse(await readFile(join(host, 'package.json'), 'utf8'));
+  await run(process.execPath, [join(host, hostManifest.bin.dsh), 'plugin', '--profile', 'compat', 'add', archive], isolation, join(cell, 'native-install.log'), bootEnv);
+  await run(process.execPath, [join(source, 'scripts/probe-profile.mjs'), host, 'compat', patch, archive, sha256, version], isolation, join(cell, 'native-boot.log'), bootEnv);
+}
+
 // Install, verify and release each host sequentially to bound temporary disk use.
-const version = JSON.parse(await readFile(join(source, 'package.json'), 'utf8')).version;
+const { version } = sourceManifest;
 const archive = await realpath(resolve(option('--archive') ?? join(source, 'artifacts', 'dsh-agentdeck-' + version + '.tgz')));
 const bytes = await readFile(archive);
 const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -80,10 +101,20 @@ const integrity = 'sha512-' + createHash('sha512').update(bytes).digest('base64'
 const results = [];
 const upgrade = versions.includes('0.2.2-rc.1') && versions.includes('0.2.2-rc.5');
 const data = join(root, 'upgrade-state');
+const alphaVersions = versions.filter(value => value.startsWith('0.2.3-alpha.'));
+const workspaceUpgrade = versions.includes('0.2.2-rc.5') && alphaVersions.length > 0;
+const upgradeRoot = workspaceUpgrade ? await mkdtemp(join(root, 'workspace-upgrade-')) : undefined;
+const workspaceLayouts = ['inherited', 'moved'];
+const workspaceSeed = layout => join(upgradeRoot, 'seed-' + layout);
+const published031 = 'https://registry.npmjs.org/dsh-agentdeck/-/dsh-agentdeck-0.3.1.tgz';
+const published031Sha = '9cac0b1c6be3a1b1691bae1f0809f6ccc7c355bc99293a3e7b05046e2bef132b';
+const workspaceProofs = [];
+if (workspaceUpgrade) assert.ok(alphaVersions.every(version => versions.indexOf(version) > versions.indexOf('0.2.2-rc.5')), 'Run RC.5 before the Alpha workspace probes');
 if (upgrade) { assert.equal(dirname(data), root); await rm(data, { recursive: true, force: true }); await mkdir(data); }
 for (const version of versions) {
   await prepare(version);
   const cell = join(root, version), project = join(cell, 'project'), host = hostOf(version);
+  await verifyNativeProfile(host, cell, version, archive, sha256);
   // This exact subtree contains only fixtures made by this marked runner.
   assert.equal(dirname(project), cell); assert.equal(dirname(cell), root);
   await rm(project, { recursive: true, force: true }); await mkdir(project);
@@ -118,6 +149,34 @@ for (const version of versions) {
     const phase = version === '0.2.2-rc.1' ? 'create' : 'resume';
     await run(process.execPath, ['scripts/probe-upgrade.mjs', phase, data], project, join(root, 'upgrade-' + phase + '.log'), { AGENTDECK_EXPECT_DSH_VERSION: version });
   }
+  if (workspaceUpgrade && version === '0.2.2-rc.5') {
+    const download = await run('npm', ['pack', published031, '--ignore-scripts', '--json', '--pack-destination', upgradeRoot], project, join(root, 'published-0.3.1.log'));
+    const [{ filename }] = JSON.parse(download);
+    assert.equal(filename, 'dsh-agentdeck-0.3.1.tgz');
+    const releaseArchive = join(upgradeRoot, filename);
+    assert.equal(createHash('sha256').update(await readFile(releaseArchive)).digest('hex'), published031Sha);
+    const old = join(project, 'published');
+    await mkdir(old);
+    await run('npm', ['install', '--prefix', old, '--ignore-scripts', '--no-audit', '--no-fund', '--legacy-peer-deps', releaseArchive], project, join(root, 'published-0.3.1-install.log'));
+    const oldEntry = join(old, 'node_modules', 'dsh-agentdeck', 'lib', 'index.js');
+    for (const layout of workspaceLayouts) {
+      const directory = workspaceSeed(layout);
+      await mkdir(directory);
+      for (const phase of ['seed', 'capture-active', 'capture']) {
+        await run(process.execPath, ['scripts/probe-workspace-upgrade.mjs', phase, directory, oldEntry, layout], project,
+          join(root, 'workspace-' + layout + '-' + phase + '.log'), { AGENTDECK_EXPECT_DSH_VERSION: version });
+      }
+    }
+  }
+  if (workspaceUpgrade && alphaVersions.includes(version)) {
+    for (const layout of workspaceLayouts) {
+      const directory = join(upgradeRoot, version + '-' + layout);
+      await cp(workspaceSeed(layout), directory, { recursive: true, verbatimSymlinks: true });
+      await run(process.execPath, ['scripts/probe-workspace-upgrade.mjs', 'resume', directory], project,
+        join(cell, 'workspace-' + layout + '-resume.log'), { AGENTDECK_EXPECT_DSH_VERSION: version });
+      workspaceProofs.push({ from: '0.2.2-rc.5', to: version, layout });
+    }
+  }
   // Keep the tiny installed candidate/resources until upgrade proof completes;
   // release only this exact marked runner's rebuildable host closure.
   const hostPrefix = join(cell, 'host');
@@ -126,4 +185,6 @@ for (const version of versions) {
 }
 if (upgrade) console.log('Passed persisted rc.1 -> rc.5 continuation');
 assert.equal(createHash('sha256').update(await readFile(archive)).digest('hex'), sha256, 'Archive changed during verification');
-console.log(JSON.stringify({ archive, sha256, versions: results.map(item => item.version), upgrade: versions.includes('0.2.2-rc.1') && versions.includes('0.2.2-rc.5') }, null, 2));
+const summary = { archive, sha256, results, upgrade, workspaceProofs };
+await writeFile(join(root, 'results.json'), JSON.stringify(summary, null, 2) + '\n');
+console.log(JSON.stringify({ archive, sha256, versions: results.map(item => item.version), upgrade, workspaceProofs }, null, 2));

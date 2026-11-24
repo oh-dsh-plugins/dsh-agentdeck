@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local';
 import Storage from '@deepseek-ai/dsh-storage';
 import * as JsonStorage from '@deepseek-ai/dsh-storage-json';
 import * as Domains from '@deepseek-ai/dsh-storage-domain';
@@ -27,8 +28,11 @@ async function fixture() {
   root.provide('subagents', { getProvider: () => ({}), rootOf: agent => agent });
   root.provide('sessionQuery', { observeSession: async () => ({ events: [], [Symbol.dispose]() {} }) });
   root.provide('agentPresets', { resolve: async id => ({ id }), register: async () => async () => {} });
-  root.provide('fs', {});
-  root.provide('workingDirectory', { get: () => directory });
+  await root.plugin(LocalFileSystem, { cwd: directory });
+  root.provide('workingDirectory', {
+    get: () => directory,
+    async ensure(agent, signal) { signal.throwIfAborted(); return this.get(agent.session); },
+  });
   root.provide('skills', {});
   root.provide('tokenMeter', {});
   root.provide('llm', {
@@ -98,6 +102,7 @@ test('selected project role can be a derivation parent and external edits are no
     await f.controller.operation('save', { id: saved.id, text: text + 'displayName: Shared reader\n', expectedRevision: saved.revision }, f.actor);
     assert.equal((await f.controller.catalog(f.actor)).agents.find(r => r.id === saved.id).parentSource, join(folder, 'project-reader.yaml'));
     const other = join(f.directory, 'other');
+    await mkdir(other);
     f.root.get('workingDirectory').get = session => session.header.cwd;
     const actorB = { ...f.actor, session: { ...f.actor.session, header: { cwd: other } } };
     await assert.rejects(f.controller.start({role:saved.id,prompt:'Read'}, {agent:actorB,callId:'missing-parent',signal:new AbortController().signal}), /Missing parent agent: project-reader/);
@@ -108,8 +113,15 @@ test('selected project role can be a derivation parent and external edits are no
     const target = { id: saved.id, cwd: 'other' };
     const rpcCatalog = await f.controller.operation('catalog', target, f.actor);
     const derivedB = rpcCatalog.agents.find(r => r.id === saved.id);
-    const candidates = await f.controller.operation('candidates', target, f.actor);
-    const modelPreview = await f.controller.operation('preview', target, f.actor);
+    const inheritsWorkspace = nativeToolsPackage.version === '0.2.3-alpha.2';
+    if (inheritsWorkspace) {
+      await assert.rejects(f.controller.operation('candidates', target, f.actor), { code: 'AGENTDECK_WORKSPACE_MISMATCH' });
+      await assert.rejects(f.controller.operation('preview', target, f.actor), { code: 'AGENTDECK_WORKSPACE_MISMATCH' });
+    }
+    const delegateTarget = inheritsWorkspace ? { id: saved.id } : target;
+    const caller = inheritsWorkspace ? actorB : f.actor;
+    const candidates = await f.controller.operation('candidates', delegateTarget, caller);
+    const modelPreview = await f.controller.operation('preview', delegateTarget, caller);
     assert.equal(candidates.revision, derivedB.revision);
     assert.equal(modelPreview.agent.revision, derivedB.revision);
     assert.equal(derivedB.instructions, 'Use the B rules.');
@@ -120,6 +132,14 @@ test('selected project role can be a derivation parent and external edits are no
     const catalog = await f.controller.catalog(f.actor);
     assert.ok(catalog.agents.some(role => role.id === 'derived-reader'));
     await assert.rejects(f.controller.save({ id: 'project-reader', text: 'schemaVersion: 1\nid: project-reader\nextends: reader\n' }, f.actor), /owned by.*project-reader\.yaml/);
+
+    const missing = join(other, 'removed');
+    f.root.get('workingDirectory').get = () => missing;
+    const change = await f.controller.operation('previewChange', {
+      id: saved.id, text, expectedRevision: f.store.getOverride(saved.id).revision,
+    }, actorB);
+    assert.equal(change.project, (await f.controller.catalog(actorB)).project);
+    assert.deepEqual(change.parent, { id: 'project-reader', source: join(await realpath(other), '.dsh', 'agentdeck', 'project-reader.yaml') });
   } finally { await f.close(); }
 });
 
@@ -463,9 +483,67 @@ test('preview cancellation rejects instead of disguising aborted model resolutio
   } finally { await f.close(); }
 });
 
-test('empty final assistant message cannot reuse a provisional completion report', async () => {
+test('empty final assistant message preserves earlier text as provisional evidence only', async () => {
   const events = [turn('turn/start'), assistant(report), turn('assistant/message', { message: { content: [] } }), turn('turn/end', { reason: { kind: 'completed' } })];
-  assert.equal((await readRunResult(resultContext(events), run)).status, 'finished-unverified');
+  const result = await readRunResult(resultContext(events), run);
+  assert.equal(result.status, 'finished-unverified');
+  assert.equal(result.rawText, JSON.stringify(report));
+  assert.equal(result.provisionalText, true);
+  assert.equal(result.summary, '');
+  assert.deepEqual(result.evidence, []);
+  const previousOnly = [turn('turn/start', { turn: 1 }), assistant(report), turn('turn/start', { turn: 2 }), ...events.slice(2)];
+  const fresh = await readRunResult(resultContext(previousOnly), run);
+  assert.equal(fresh.rawText, '');
+  assert.equal(fresh.provisionalText, undefined);
+});
+
+test('a tool-call draft stays provisional when the next model request fails', async () => {
+  const draft = { ...report, artifacts: ['unconfirmed-file'] };
+  const toolMessage = assistant(draft);
+  toolMessage.data.message.content.push({ type: 'tool-call', id: 'check', name: 'read', arguments: '{}' });
+  const prefix = [turn('turn/start'), toolMessage];
+  const failure = { kind: 'error', error: { code: 'REQUEST_FAILED', message: 'Model request failed' } };
+  const failed = await readRunResult(resultContext([...prefix, turn('assistant/attempt'), turn('turn/end', { reason: failure })]), run);
+  assert.equal(failed.status, 'failed');
+  assert.deepEqual(failed.nativeStop, failure);
+  assert.equal(failed.rawText, JSON.stringify(draft));
+  assert.equal(failed.provisionalText, true);
+  assert.equal(failed.summary, '');
+  assert.deepEqual(failed.evidence, []);
+  assert.deepEqual(failed.artifacts, []);
+
+  const toolEnded = await readRunResult(resultContext([...prefix, turn('turn/end', { reason: { kind: 'completed' } })]), run);
+  assert.equal(toolEnded.status, 'finished-unverified');
+  assert.equal(toolEnded.provisionalText, true);
+
+  const final = { status: 'completed', summary: 'Checks completed', evidence: ['confirmed'] };
+  const completed = await readRunResult(resultContext([...prefix, assistant(final), turn('turn/end', { reason: { kind: 'completed' } })]), run);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.summary, final.summary);
+  assert.deepEqual(completed.evidence, final.evidence);
+  assert.equal(completed.provisionalText, undefined);
+});
+
+test('complete native stop diagnostic is independently paged and revision checked', async () => {
+  const stopped = reason => resultContext([turn('turn/start'), turn('turn/end', { reason })]);
+  const reason = { kind: 'error', error: { code: 'NATIVE_FAILURE', message: 'x'.repeat(5100) + ' original tail', status: 503, requestId: 'request-9' } };
+  const query = stopped(reason);
+  const first = await readRunResult(query, run);
+  assert.equal(first.nativeStop.truncated, true);
+  assert.equal(first.rawText, '');
+  assert.equal(first.nextOffset, undefined);
+  let raw = '';
+  let offset = 0;
+  do {
+    const page = await readRunResult(query, run, offset, 1000, first.resultRevision, undefined, 'nativeStop');
+    assert.equal(page.resultRevision, first.resultRevision);
+    assert.ok(page.rawText.length <= 1000);
+    assert.equal(page.totalCharacters, JSON.stringify(reason, null, 2).length);
+    raw += page.rawText;
+    offset = page.nextOffset;
+  } while (offset !== undefined);
+  assert.deepEqual(JSON.parse(raw), reason);
+  await assert.rejects(readRunResult(stopped({ ...reason, error: { ...reason.error, requestId: 'changed' } }), run, 0, 1000, first.resultRevision, undefined, 'nativeStop'), /revision.*first page/i);
 });
 
 test('model preview separates invalid parameters and unavailable metadata', async () => {

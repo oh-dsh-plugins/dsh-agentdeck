@@ -22,7 +22,7 @@ export interface SessionQueries extends ResultQueries {
   diagnostics(): { compatibilityVersion: string; minimumVersion: string; rootDiscovery: string; activationReceipt: string; nativeProvider: boolean; storage: boolean };
 }
 export type ModelRoute = { provider: string; model: string };
-export type RoutePolicy = ModelRoute[] | undefined | { kind: 'unknown'; message: string };
+export type RoutePolicy = ModelRoute[] | undefined | { kind: 'unknown'; message: string; code?: string };
 export interface ModelQueries {
   selection(agent?: RuntimeAgent): JsonObject | undefined;
   inheritance(agent?: RuntimeAgent): JsonObject | undefined;

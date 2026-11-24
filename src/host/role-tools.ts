@@ -7,6 +7,7 @@ const MAX_FILE = 1_048_576;
 const MAX_OUTPUT = 24_000;
 const PROJECT_HELPER = 'assets/scripts/project-checks.mjs';
 const CSV_HELPER = 'assets/scripts/csv-profile.mjs';
+const CSV_030_REVISION = '47dcb29b6cbdcd0ac9eb22fba75a9d34f76fcb4bbedb22b81b422af05550f09f';
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }] };
 const jsonOutput = { schema: { type: 'object' as const, additionalProperties: true as const }, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] };
 
@@ -41,7 +42,10 @@ export async function ownedHelper(ctx: HostContext, snapshot: RoleSnapshot, path
   const revision = snapshot.scriptRevisions?.[path];
   if (!revision || !/^[a-f0-9]{64}$/.test(revision)) throw new Error(`Pinned revision is unavailable for helper ${path}; resume with the original snapshot dependencies.`);
   const fs = service(ctx, 'fs');
-  const absolute = fileURLToPath(new URL(`../../${path}`, import.meta.url));
+  // Preserve the exact released bytes for snapshots created before the parser update.
+  const resource = path === CSV_HELPER && revision === CSV_030_REVISION
+    ? 'assets/scripts/compat/csv-profile-0.3.0.mjs' : path;
+  const absolute = fileURLToPath(new URL(`../../${resource}`, import.meta.url));
   const target = await fs.resolve(absolute, { signal });
   const bytes = await fs.readBytes(target, signal, 262_144);
   if (createHash('sha256').update(bytes).digest('hex') !== revision) throw new Error(`Helper revision changed: ${path}; the running snapshot cannot use replacement code.`);

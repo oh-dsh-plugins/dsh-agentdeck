@@ -1,5 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type {} from '@deepseek-ai/dsh-session-query';
+import type {} from '@deepseek-ai/dsh-working-directory';
 import type { AgentDefinition, SkillDefinition } from '../core/index.js';
 
 /** Public Cordis dependency APIs are discovered at runtime; narrow at each owner. */
@@ -25,6 +27,20 @@ export interface RoleSnapshot {
   scriptRevisions?: Record<string, string>;
   sourceRevision?: string;
   candidateId?: string;
+  /** The native workspace used to assemble this Alpha snapshot. */
+  expectedWorkspace?: string;
+}
+
+export interface WorkspaceCut {
+  sourceVersion: string;
+  childId: string;
+  parentId: string;
+  presetId: string;
+  snapshotId: string;
+  createdAt: number;
+  cwd: string;
+  cursor: number;
+  directoryHistory: string;
 }
 
 export interface RunRecord {
@@ -34,6 +50,7 @@ export interface RunRecord {
   model?: { provider: string; model: string; reasoningEffort?: string };
   fallback?: { to: 'general' | 'native'; reason: string };
   decision?: RoutingDecision;
+  workspaceCut?: WorkspaceCut;
 }
 
 export function object(value: unknown, label = 'request'): JsonObject {
